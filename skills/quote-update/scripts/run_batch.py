@@ -21,6 +21,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--username", help="账号")
     p.add_argument("--password", help="密码")
     p.add_argument("--headless", action="store_true", help="网价抓取启用无头")
+    p.add_argument("--manual-login-timeout", type=int, default=180, help="有头模式下等待人工登录的秒数")
     p.add_argument("--image-source-map", help="批量图片源映射json")
     p.add_argument("--artifact-dir", default="运行产物", help="产物目录")
     p.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
@@ -60,6 +61,8 @@ def main() -> int:
         cmd.extend(["--password", args.password])
     if args.headless:
         cmd.append("--headless")
+    if args.manual_login_timeout != 180:
+        cmd.extend(["--manual-login-timeout", str(args.manual_login_timeout)])
     if args.dry_run:
         cmd.append("--dry-run")
     if args.confirm_write:

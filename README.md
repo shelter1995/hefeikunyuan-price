@@ -72,6 +72,17 @@ python skills/quote-update/scripts/run_single.py `
   --headless
 ```
 
+若网价站点登录失败、出现验证码/滑块或登录入口变化，改用有头模式让用户手动登录一次：
+
+```powershell
+python skills/quote-update/scripts/run_single.py `
+  --project "项目报价/<项目Excel路径>" `
+  --mode both `
+  --dry-run
+```
+
+有头模式下自动登录失败后，脚本会保持浏览器打开并等待人工登录，默认最多等待 180 秒；可用 `--manual-login-timeout 300` 调整。登录态会保存在 `.chrome_user_data/`，后续可继续使用 `--headless`。
+
 确认报告无待确认/无异常后，再允许真实写入：
 
 ```powershell

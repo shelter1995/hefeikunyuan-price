@@ -17,6 +17,7 @@ Get-ChildItem "项目报价/" | Select-Object Name
 ## 命令执行纪律
 
 - 命令失败时（非零退出码）：必须报告完整错误、分析原因、提出修复方案、**等待用户确认**。
+- 网价登录失败、验证码/滑块、登录入口不可见时：停止重跑 headless，改用不带 `--headless` 的有头 dry-run，让用户手动登录。
 - 【禁止】绕过主流程脚本直接调用子命令。
 - 【禁止】命令失败后编造数据或伪造报告。
 - 修复后必须**重新运行同一个命令**，而非手动拼凑。
@@ -29,6 +30,15 @@ python skills/quote-update/scripts/run_single.py `
   --headless
 ```
 说明：未显式传 `--image-inputs/--image-jsons` 时，会自动读取 `线下报价` 目录。
+
+## 单文件（网页登录需要人工辅助时）
+```powershell
+python skills/quote-update/scripts/run_single.py `
+  --project "项目报价/<项目Excel路径>" `
+  --mode both `
+  --dry-run `
+  --manual-login-timeout 300
+```
 
 ## 批量
 ```powershell

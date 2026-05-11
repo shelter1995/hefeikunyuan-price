@@ -607,7 +607,34 @@ def _detect_logged_in(page: Any, retry: bool = False) -> tuple[bool, str]:
     return False, "未检测到登录态"
 
 
-def _login(page: Any, user: str, pwd: str) -> str:
+def _wait_for_manual_login(
+    page: Any,
+    timeout_seconds: int,
+    poll_interval_seconds: int,
+) -> tuple[bool, str]:
+    timeout_seconds = max(1, timeout_seconds)
+    poll_interval_seconds = max(1, poll_interval_seconds)
+    attempts = max(1, timeout_seconds // poll_interval_seconds)
+    print(
+        "[web_price] 自动登录未成功。请在打开的浏览器中手动完成登录，"
+        f"脚本将等待最多 {timeout_seconds} 秒。"
+    )
+    for _ in range(attempts):
+        page.wait_for_timeout(poll_interval_seconds * 1000)
+        ok, proof = _detect_logged_in(page)
+        if ok:
+            return True, proof
+    return False, "等待人工登录超时，仍未检测到登录态"
+
+
+def _login(
+    page: Any,
+    user: str,
+    pwd: str,
+    allow_manual_login: bool = False,
+    manual_login_timeout_seconds: int = 180,
+    manual_login_poll_interval_seconds: int = 3,
+) -> str:
     page.goto("https://www.mysteel.com/", timeout=60000, wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
     already_logged, reason = _detect_logged_in(page)
@@ -632,23 +659,42 @@ def _login(page: Any, user: str, pwd: str) -> str:
             if page.locator('input[placeholder="请输入用户名"]:visible').count() > 0:
                 break
         if not opened:
-            raise WebPriceError("登录入口未找到（topbar-nav-login/登录按钮）")
+            if not allow_manual_login:
+                raise WebPriceError("登录入口未找到（topbar-nav-login/登录按钮）")
+            print("[web_price] 自动点击登录入口失败，改为等待人工登录。")
 
         user_input = page.locator('input[placeholder="请输入用户名"]:visible').first
         pwd_input = page.locator('input[placeholder="请输入密码"]:visible').first
-        if user_input.count() == 0 or pwd_input.count() == 0:
+        if (user_input.count() == 0 or pwd_input.count() == 0) and not allow_manual_login:
             raise WebPriceError("账号登录输入框不可见，请检查登录弹窗状态")
-        user_input.fill(user)
-        pwd_input.fill(pwd)
-        if not _click_any(page, [".form-button-login:visible", ".form-button-login", "button:has-text('登录')"], timeout_ms=10000):
-            raise WebPriceError("登录按钮未找到")
+        if user_input.count() > 0 and pwd_input.count() > 0:
+            user_input.fill(user)
+            pwd_input.fill(pwd)
+        elif allow_manual_login:
+            print("[web_price] 自动登录输入框不可见，改为等待人工登录。")
+        if user_input.count() > 0 and pwd_input.count() > 0 and not _click_any(
+            page,
+            [".form-button-login:visible", ".form-button-login", "button:has-text('登录')"],
+            timeout_ms=10000,
+        ):
+            if not allow_manual_login:
+                raise WebPriceError("登录按钮未找到")
+            print("[web_price] 自动点击登录按钮失败，改为等待人工登录。")
     page.wait_for_timeout(4000)
     ok, proof = _detect_logged_in(page)
     if not ok:
         page.wait_for_timeout(2000)
         ok, proof = _detect_logged_in(page)
+    if not ok and allow_manual_login:
+        ok, proof = _wait_for_manual_login(
+            page,
+            timeout_seconds=manual_login_timeout_seconds,
+            poll_interval_seconds=manual_login_poll_interval_seconds,
+        )
+        if ok:
+            return f"人工登录成功（{proof}）"
     if not ok:
-        raise WebPriceError(f"登录失败：{proof}")
+        raise WebPriceError(f"登录失败：{proof}。如遇验证码/滑块，请去掉 --headless 使用有头浏览器手动登录。")
     return f"登录成功（{proof}）"
 
 
@@ -784,6 +830,7 @@ def fetch_web_prices(
     output_excel: Path,
     report_out: Path,
     headless: bool,
+    manual_login_timeout_seconds: int = 180,
 ) -> dict[str, Any]:
     loc = location or _parse_location(project_excel.name)[0]
     city = _city(loc)
@@ -795,7 +842,13 @@ def fetch_web_prices(
     with sync_playwright() as p:
         browser, context, page, connection_type = _launch_browser_with_state(p, headless)
 
-        proof = _login(page, user, pwd)
+        proof = _login(
+            page,
+            user,
+            pwd,
+            allow_manual_login=not headless,
+            manual_login_timeout_seconds=manual_login_timeout_seconds,
+        )
         url = detail_url or _latest_url_from_list(page, str(list_page), city)
         page.goto(url, timeout=60000, wait_until="networkidle")
         rows = _extract_detail_rows(page)
@@ -1182,6 +1235,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--output", help="原材料清单输出xlsx路径")
     p_fetch.add_argument("--report-out", help="fetch报告输出路径")
     p_fetch.add_argument("--headless", action="store_true", help="启用无头模式")
+    p_fetch.add_argument("--manual-login-timeout", type=int, default=180, help="有头模式下等待人工登录的秒数")
 
     p_prepare = sub.add_parser("prepare", help="生成网价厂家待确认对照（或复用正式对照）")
     p_prepare.add_argument("--project", required=True, help="项目报价Excel路径")
@@ -1241,6 +1295,7 @@ def main() -> int:
             output_excel=output,
             report_out=report_out,
             headless=args.headless,
+            manual_login_timeout_seconds=args.manual_login_timeout,
         )
         if not args.output:
             target = Path("运行产物") / f"{loc}{report['quote_date']}建筑钢材原料价格清单.xlsx"

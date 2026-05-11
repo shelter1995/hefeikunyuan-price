@@ -86,6 +86,35 @@ def test_run_single_confirm_write_with_refresh_uses_full_flow(monkeypatch, tmp_p
     assert calls == ["web_flow"]
 
 
+def test_run_single_passes_manual_login_timeout_to_web_flow(monkeypatch, tmp_path: Path):
+    seen: dict[str, int] = {}
+
+    def fake_web_flow(*args, **kwargs):
+        seen["manual_login_timeout_seconds"] = kwargs["manual_login_timeout_seconds"]
+        return {"status": "ok", "apply_summary": _ok_summary()}
+
+    monkeypatch.setattr(pipeline, "_web_flow", fake_web_flow)
+
+    result = pipeline.run_single(
+        project=tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx",
+        mode="web",
+        list_url=None,
+        detail_url=None,
+        account_file=tmp_path / "网站账号密码.txt",
+        username=None,
+        password=None,
+        headless=False,
+        image_inputs=[],
+        image_jsons=[],
+        artifact_dir=tmp_path / "运行产物",
+        dry_run=True,
+        manual_login_timeout_seconds=45,
+    )
+
+    assert result["status"] == "ok"
+    assert seen["manual_login_timeout_seconds"] == 45
+
+
 def test_web_apply_from_artifacts_blocks_when_mapping_pending(tmp_path: Path):
     project = tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx"
     artifact_dir = tmp_path / "运行产物"

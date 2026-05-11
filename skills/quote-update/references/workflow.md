@@ -20,6 +20,14 @@
 python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mode both --dry-run --headless
 ```
 
+如果网价登录失败、验证码/滑块阻断或登录入口改版，停止重试 headless，改用有头 dry-run：
+
+```powershell
+python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mode both --dry-run
+```
+
+有头模式会在自动登录失败后等待用户手动登录，默认等待 180 秒；需要更长时间时追加 `--manual-login-timeout 300`。用户完成登录后，脚本会继续执行并保存登录态。
+
 确认无待确认、无偏差异常，并经用户确认后，才允许真实写入：
 
 ```powershell
