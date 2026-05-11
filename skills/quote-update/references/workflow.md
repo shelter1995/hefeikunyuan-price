@@ -26,6 +26,10 @@ python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mo
 python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mode both --confirm-write --headless
 ```
 
+`--confirm-write` 默认复用 dry-run 产物直接 apply。仅在需要重抓网价或重跑OCR时，才追加：
+- `--refresh-web-artifacts`
+- `--refresh-image-artifacts`
+
 ### 步骤1：前置准备
 1. **文件路径确认**：用 `Glob` 或 `LS` 工具确认 `项目报价/` 目录下的**实际文件名**，以磁盘上的名字为准，禁止增删任何字符。
 2. 从文件名提取 `地点1`（用于网价）和 `地点2`（用于图片/文档）。

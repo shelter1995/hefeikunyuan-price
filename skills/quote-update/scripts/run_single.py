@@ -25,6 +25,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifact-dir", default="运行产物", help="产物目录")
     p.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
     p.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
+    p.add_argument("--refresh-web-artifacts", action="store_true", help="confirm-write时强制重跑网价抓取与对照生成")
+    p.add_argument("--refresh-image-artifacts", action="store_true", help="confirm-write时强制重跑OCR与图片文档对照生成")
     p.add_argument("--report-out", help="总结报告路径")
     return p
 
@@ -60,6 +62,10 @@ def main() -> int:
         cmd.append("--dry-run")
     if args.confirm_write:
         cmd.append("--confirm-write")
+    if args.refresh_web_artifacts:
+        cmd.append("--refresh-web-artifacts")
+    if args.refresh_image_artifacts:
+        cmd.append("--refresh-image-artifacts")
     if args.image_inputs:
         cmd.append("--image-inputs")
         cmd.extend(args.image_inputs)

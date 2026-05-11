@@ -82,6 +82,10 @@ python skills/quote-update/scripts/run_single.py `
   --headless
 ```
 
+`--confirm-write` 默认直接复用最近一次 dry-run 产物做 apply 写入（不重复抓网价、不重复跑OCR）。如确需重生产物，可追加：
+- `--refresh-web-artifacts`
+- `--refresh-image-artifacts`
+
 线下报价价格校验以项目文件中同厂家 sheet 的网价为动态参考：H3(盘螺) 对比 G3，H4(螺纹) 对比 G4。任一价格与网价的差值超过 1000 元/吨或偏离比例超过 20% 时，不自动回写，报告为“线下价与网价偏差过大”，需要人工确认。若 G3/G4 没有可用网价，允许回写，但报告备注“无网价参考”。
 
 ### 低能力模型/外部Agent执行限制

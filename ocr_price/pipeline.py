@@ -35,6 +35,7 @@ from .xlsx_utils import load_workbook_safe
 SKIP_SHEETS = {"报价表"}
 DEFAULT_OFFLINE_DIR = Path("线下报价")
 OFFLINE_SOURCE_SUFFIXES = {".jpg", ".jpeg", ".png", ".pdf", ".txt", ".json"}
+OCR_JSON_GLOB = "ocr价格提取_*.json"
 
 
 def _ts() -> str:
@@ -433,6 +434,163 @@ def _print_result_details(result: dict[str, Any]) -> None:
     _print_flow_details("ImageDoc", result.get("image_doc"))
 
 
+def _latest_file(paths: list[Path]) -> Path | None:
+    existing = [p for p in paths if p.exists() and p.is_file()]
+    if not existing:
+        return None
+    return max(existing, key=lambda p: p.stat().st_mtime)
+
+
+def _latest_glob_file(base_dir: Path, pattern: str) -> Path | None:
+    return _latest_file([p for p in base_dir.glob(pattern) if p.is_file()])
+
+
+def _artifact_mapping_path(artifact_dir: Path, stem: str) -> Path | None:
+    confirmed = artifact_dir / f"{stem}_已确认.json"
+    pending = artifact_dir / f"{stem}_待确认.json"
+    if confirmed.exists():
+        return confirmed
+    if pending.exists():
+        return pending
+    return None
+
+
+def _web_apply_from_artifacts(
+    project: Path,
+    location: str,
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    mapping_path = _artifact_mapping_path(artifact_dir, f"厂家对照表_{location}")
+    if mapping_path is None:
+        return {
+            "status": "skipped",
+            "phase": "web_apply",
+            "reason": "未找到网价对照表产物，请先执行 --dry-run 或加 --refresh-web-artifacts。",
+        }
+    if _mapping_has_pending(mapping_path):
+        return {
+            "status": "pending_confirmation",
+            "phase": "web_apply",
+            "pending_mapping_json": str(mapping_path),
+            "pending_details": _pending_details(mapping_path, project),
+            "reason": "网价对照存在待确认项，请先确认后再执行写入",
+        }
+
+    fetch_report_path = _latest_glob_file(artifact_dir, f"网价提取报告_{location}_*.json")
+    fetch_report: dict[str, Any] = {}
+    if fetch_report_path is not None:
+        payload = _json_read(fetch_report_path)
+        if isinstance(payload, dict):
+            fetch_report = payload
+
+    raw_excel: Path | None = None
+    raw_from_report = str(fetch_report.get("raw_price_excel") or "").strip()
+    if raw_from_report:
+        candidate = Path(raw_from_report)
+        if not candidate.is_absolute():
+            candidate = artifact_dir / candidate
+        if candidate.exists():
+            raw_excel = candidate
+    if raw_excel is None:
+        raw_excel = _latest_glob_file(artifact_dir, f"{location}*建筑钢材原料价格清单*.xlsx")
+    if raw_excel is None:
+        raw_excel = _latest_glob_file(artifact_dir, "*建筑钢材原料价格清单*.xlsx")
+    if raw_excel is None:
+        return {
+            "status": "skipped",
+            "phase": "web_apply",
+            "reason": "未找到网价清单产物，请先执行 --dry-run 或加 --refresh-web-artifacts。",
+        }
+
+    quote_date = str(fetch_report.get("quote_date") or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    source_url = str(fetch_report.get("latest_url") or "").strip()
+    apply_report_path = artifact_dir / f"网价回写报告_{location}_{_ts()}.json"
+    apply_report = apply_web_writeback(
+        project_excel=project,
+        raw_excel=raw_excel,
+        mapping_json=mapping_path,
+        quote_date=quote_date,
+        source_url=source_url,
+        report_out=apply_report_path,
+    )
+    if apply_report.get("blocked"):
+        return {
+            "status": "pending_confirmation",
+            "phase": "web_apply",
+            "apply_report": str(apply_report_path),
+            "reason": str(apply_report.get("blocked_reason") or "网价回写被阻断"),
+        }
+    return {
+        "status": "ok",
+        "phase": "web_apply",
+        "apply_report": str(apply_report_path),
+        "source_mode": "reuse_artifacts",
+        "apply_summary": _web_apply_summary(apply_report),
+    }
+
+
+def _image_apply_from_artifacts(
+    project: Path,
+    location: str,
+    artifact_dir: Path,
+    source_jsons: list[Path] | None = None,
+) -> dict[str, Any]:
+    mapping_path = _artifact_mapping_path(artifact_dir, f"图片文档厂家对照表_{location}")
+    if mapping_path is None:
+        return {
+            "status": "skipped",
+            "phase": "image_apply",
+            "reason": "未找到图片/文档对照表产物，请先执行 --dry-run 或加 --refresh-image-artifacts。",
+        }
+    if _mapping_has_pending(mapping_path):
+        return {
+            "status": "pending_confirmation",
+            "phase": "image_apply",
+            "pending_mapping_json": str(mapping_path),
+            "pending_details": _pending_details(mapping_path, project),
+            "reason": "图片/文档对照存在待确认项，请先确认后再执行写入",
+        }
+
+    json_paths = [p for p in (source_jsons or []) if p.exists() and p.is_file()]
+    if not json_paths:
+        json_paths = sorted([p for p in artifact_dir.glob(OCR_JSON_GLOB) if p.is_file()])
+    if not json_paths:
+        return {
+            "status": "skipped",
+            "phase": "image_apply",
+            "reason": "未找到OCR JSON产物，请先执行 --dry-run 或加 --refresh-image-artifacts。",
+        }
+
+    apply_report_path = artifact_dir / f"图片文档回写报告_{location}_{_ts()}.json"
+    apply_report = apply_image_writeback(
+        project_excel=project,
+        source_json_paths=json_paths,
+        mapping_json_path=mapping_path,
+        location=_city(location),
+        report_out=apply_report_path,
+        dry_run=False,
+    )
+    if apply_report.get("blocked"):
+        return {
+            "status": "pending_confirmation",
+            "phase": "image_apply",
+            "apply_report": str(apply_report_path),
+            "reason": str(apply_report.get("blocked_reason") or "图片/文档回写被阻断"),
+        }
+    apply_summary = _image_apply_summary(apply_report)
+    audit_report = None
+    if apply_summary.get("updated_items"):
+        audit_report = audit_image_doc_updates(project, apply_report.get("updates") or [])
+    return {
+        "status": "ok",
+        "phase": "image_apply",
+        "apply_report": str(apply_report_path),
+        "source_mode": "reuse_artifacts",
+        "apply_summary": apply_summary,
+        "audit_report": audit_report,
+    }
+
+
 def _web_flow(
     project: Path,
     location: str,
@@ -714,6 +872,9 @@ def run_single(
     image_jsons: list[Path],
     artifact_dir: Path,
     dry_run: bool = False,
+    confirm_write: bool = False,
+    refresh_web_artifacts: bool = False,
+    refresh_image_artifacts: bool = False,
 ) -> dict[str, Any]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     web_location, image_location = _safe_locations(project)
@@ -727,43 +888,55 @@ def run_single(
 
     web_pending = False
     if mode in {"web", "both"}:
-        result["web"] = _web_flow(
-            project=project,
-            location=web_location,
-            list_url=list_url,
-            detail_url=detail_url,
-            account_file=account_file,
-            username=username,
-            password=password,
-            headless=headless,
-            artifact_dir=artifact_dir,
-            apply_if_ready=not dry_run,
-        )
+        if confirm_write and not refresh_web_artifacts:
+            result["web"] = _web_apply_from_artifacts(
+                project=project,
+                location=web_location,
+                artifact_dir=artifact_dir,
+            )
+        else:
+            result["web"] = _web_flow(
+                project=project,
+                location=web_location,
+                list_url=list_url,
+                detail_url=detail_url,
+                account_file=account_file,
+                username=username,
+                password=password,
+                headless=headless,
+                artifact_dir=artifact_dir,
+                apply_if_ready=not dry_run,
+            )
         web_pending = result["web"].get("status") == "pending_confirmation"
 
     if mode in {"image_doc", "both"}:
-        json_sources = list(image_jsons)
-        if image_inputs:
-            json_sources.extend(_run_ocr_for_inputs(image_inputs, location=_city(image_location), artifact_dir=artifact_dir))
+        if confirm_write and not refresh_image_artifacts:
+            result["image_doc"] = _image_apply_from_artifacts(
+                project=project,
+                location=image_location,
+                artifact_dir=artifact_dir,
+                source_jsons=list(image_jsons),
+            )
+        else:
+            json_sources = list(image_jsons)
+            if image_inputs:
+                json_sources.extend(_run_ocr_for_inputs(image_inputs, location=_city(image_location), artifact_dir=artifact_dir))
 
-        # 步骤1：生成厂家名称对照表，等待用户确认
-        factory_mapping = _build_factory_mapping(project, json_sources)
-        if factory_mapping:
-            result["factory_mapping"] = factory_mapping
-            _print_factory_mapping(factory_mapping)
-            # 如果用户未确认，设置pending状态并返回
-            # 用户确认后需重新运行（或在交互模式下输入确认）
-            # 这里先打印对照表，用户确认后继续
+            # 步骤1：生成厂家名称对照表，等待用户确认
+            factory_mapping = _build_factory_mapping(project, json_sources)
+            if factory_mapping:
+                result["factory_mapping"] = factory_mapping
+                _print_factory_mapping(factory_mapping)
 
-        image_prepare_only = mode == "both" and web_pending
-        result["image_doc"] = _image_flow(
-            project=project,
-            location=image_location,
-            source_jsons=json_sources,
-            artifact_dir=artifact_dir,
-            apply_if_ready=not image_prepare_only,
-            dry_run=dry_run,
-        )
+            image_prepare_only = mode == "both" and web_pending
+            result["image_doc"] = _image_flow(
+                project=project,
+                location=image_location,
+                source_jsons=json_sources,
+                artifact_dir=artifact_dir,
+                apply_if_ready=not image_prepare_only,
+                dry_run=dry_run,
+            )
 
     if result.get("web", {}).get("status") == "pending_confirmation" or result.get("image_doc", {}).get("status") == "pending_confirmation":
         result["status"] = "pending_confirmation"
@@ -793,6 +966,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_single.add_argument("--artifact-dir", default="运行产物", help="产物目录")
     p_single.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
     p_single.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
+    p_single.add_argument("--refresh-web-artifacts", action="store_true", help="confirm-write时强制重跑网价抓取与对照生成")
+    p_single.add_argument("--refresh-image-artifacts", action="store_true", help="confirm-write时强制重跑OCR与图片文档对照生成")
     p_single.add_argument("--report-out", help="单文件总结报告路径")
 
     p_batch = sub.add_parser("batch", help="批量更新")
@@ -809,6 +984,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--artifact-dir", default="运行产物", help="产物目录")
     p_batch.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
     p_batch.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
+    p_batch.add_argument("--refresh-web-artifacts", action="store_true", help="confirm-write时强制重跑网价抓取与对照生成")
+    p_batch.add_argument("--refresh-image-artifacts", action="store_true", help="confirm-write时强制重跑OCR与图片文档对照生成")
     p_batch.add_argument("--report-out", help="批量总结报告路径")
     return p
 
@@ -837,6 +1014,8 @@ def _default_offline_sources(offline_dir: Path = DEFAULT_OFFLINE_DIR) -> list[st
 
 def main() -> int:
     args = _build_parser().parse_args()
+    if args.dry_run and args.confirm_write:
+        raise SystemExit("--dry-run 与 --confirm-write 不能同时使用。")
     if not args.dry_run and not args.confirm_write:
         raise SystemExit("为防止误操作，写入项目Excel必须显式传入 --confirm-write；预演请使用 --dry-run。")
     artifact_base_dir = Path(args.artifact_dir)
@@ -847,7 +1026,13 @@ def main() -> int:
         project_artifact_dir = _project_artifact_dir(artifact_base_dir, project_path)
         image_inputs = [Path(x) for x in args.image_inputs]
         image_jsons = [Path(x) for x in args.image_jsons]
-        if args.mode in {"image_doc", "both"} and not image_inputs and not image_jsons:
+        auto_collect_sources = (
+            args.mode in {"image_doc", "both"}
+            and (args.dry_run or args.refresh_image_artifacts)
+            and not image_inputs
+            and not image_jsons
+        )
+        if auto_collect_sources:
             auto_sources = _default_offline_sources()
             auto_inputs, auto_jsons = _split_image_sources(auto_sources)
             image_inputs = auto_inputs
@@ -865,6 +1050,9 @@ def main() -> int:
             image_jsons=image_jsons,
             artifact_dir=project_artifact_dir,
             dry_run=args.dry_run,
+            confirm_write=args.confirm_write,
+            refresh_web_artifacts=args.refresh_web_artifacts,
+            refresh_image_artifacts=args.refresh_image_artifacts,
         )
         report_out = (
             Path(args.report_out)
@@ -905,7 +1093,8 @@ def main() -> int:
             if isinstance(source_map, dict) and source_map:
                 mapped = source_map.get(project.name, [])
             else:
-                mapped = default_offline_sources if args.mode in {"image_doc", "both"} else []
+                should_collect = args.mode in {"image_doc", "both"} and (args.dry_run or args.refresh_image_artifacts)
+                mapped = default_offline_sources if should_collect else []
             img_inputs, img_jsons = _split_image_sources(mapped)
             project_artifact_dir = _project_artifact_dir(artifact_base_dir, project)
             result = run_single(
@@ -921,6 +1110,9 @@ def main() -> int:
                 image_jsons=img_jsons,
                 artifact_dir=project_artifact_dir,
                 dry_run=args.dry_run,
+                confirm_write=args.confirm_write,
+                refresh_web_artifacts=args.refresh_web_artifacts,
+                refresh_image_artifacts=args.refresh_image_artifacts,
             )
             summary["results"].append(result)
             _print_result_details(result)
