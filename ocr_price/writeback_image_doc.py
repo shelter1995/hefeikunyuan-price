@@ -79,6 +79,49 @@ class SourcePrice:
     is_electronic_negotiation: bool = False  # True if price is "电议" (electronic negotiation)
 
 
+@dataclass(frozen=True)
+class PriceDeviationConfig:
+    abs_tolerance: int = 1000
+    pct_tolerance: float = 0.20
+
+
+def _coerce_price(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    text = str(value).replace(",", "").strip()
+    match = re.search(r"(?<!\d)(\d{3,5})(?!\d)", text)
+    return int(match.group(1)) if match else None
+
+
+def _check_price_deviation(
+    offline_price: int | None,
+    web_price: Any,
+    label: str,
+    config: PriceDeviationConfig,
+) -> str | None:
+    if offline_price is None:
+        return None
+    reference = _coerce_price(web_price)
+    if reference is None or reference <= 0:
+        return None
+
+    diff = offline_price - reference
+    abs_diff = abs(diff)
+    pct_diff = abs_diff / reference
+    if abs_diff > config.abs_tolerance or pct_diff > config.pct_tolerance:
+        return (
+            f"{label}线下价与网价偏差过大："
+            f"线下={offline_price}，网价={reference}，"
+            f"差值={diff}，偏离={pct_diff:.2%}，"
+            f"阈值={config.abs_tolerance}元/{config.pct_tolerance:.0%}"
+        )
+    return None
+
+
 def _extract_company_from_filename(filename: str) -> str:
     """
     Extract manufacturer from file name, e.g.:
@@ -197,9 +240,18 @@ def _extract_rebar_14_from_text(text: str) -> int | None:
         m = re.search(pat, text)
         if m:
             price = int(m.group(1))
-            if 2000 <= price <= 6000:
+            if 1000 <= price <= 10000:
                 return price
     return None
+
+
+def _missing_reference_notes(ws: Any, src: SourcePrice) -> list[str]:
+    notes: list[str] = []
+    if src.coil_price is not None and _coerce_price(ws["G3"].value) is None:
+        notes.append("盘螺无网价参考")
+    if src.rebar_price is not None and _coerce_price(ws["G4"].value) is None:
+        notes.append("螺纹无网价参考")
+    return notes
 
 
 def _load_single_source_price(path: Path, location: str) -> SourcePrice | None:
@@ -609,6 +661,7 @@ def apply_writeback(
     mapping_json_path: Path,
     location: str,
     report_out: Path,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     raw_mapping_rows = json.loads(mapping_json_path.read_text(encoding="utf-8"))
     if not isinstance(raw_mapping_rows, list):
@@ -652,6 +705,7 @@ def apply_writeback(
             "blocked": True,
             "blocked_reason": "存在未确认的新厂家，已停止写价",
             "unresolved_sources": unresolved_sources,
+            "dry_run": dry_run,
             "updated_count": 0,
             "skipped_count": 0,
             "backup_file": None,
@@ -718,6 +772,37 @@ def apply_writeback(
         ws = wb[sheet]
         old_h1, old_h3, old_h4 = ws["H1"].value, ws["H3"].value, ws["H4"].value
         new_h1 = f"报价[{src.quote_date}]"
+
+        deviation_config = PriceDeviationConfig()
+        deviation_reasons: list[str] = []
+        coil_deviation = _check_price_deviation(
+            offline_price=src.coil_price,
+            web_price=ws["G3"].value,
+            label="盘螺",
+            config=deviation_config,
+        )
+        if coil_deviation:
+            deviation_reasons.append(coil_deviation)
+        rebar_deviation = _check_price_deviation(
+            offline_price=src.rebar_price,
+            web_price=ws["G4"].value,
+            label="螺纹",
+            config=deviation_config,
+        )
+        if rebar_deviation:
+            deviation_reasons.append(rebar_deviation)
+
+        if deviation_reasons:
+            skipped.append(
+                {
+                    "项目文件Sheet": sheet,
+                    "来源厂家": source_company,
+                    "原因": "；".join(deviation_reasons),
+                }
+            )
+            continue
+
+        reference_notes = _missing_reference_notes(ws, src)
         ws["H1"] = new_h1
 
         # 只要有一个价格有值就执行回写，缺失的价格保留原值
@@ -750,8 +835,15 @@ def apply_writeback(
             continue
 
         partial_note = note
+        if reference_notes:
+            ref_note = "；".join(reference_notes)
+            partial_note = f"{partial_note}({ref_note})" if partial_note else ref_note
         if partial_skip:
-            partial_note += f"(跳过{'+'.join(partial_skip)}：价格为空，保留原值)"
+            skip_note = f"跳过{'+'.join(partial_skip)}：价格为空，保留原值"
+            if partial_note:
+                partial_note = f"{partial_note}({skip_note})"
+            else:
+                partial_note = skip_note
 
         updates.append(
             {
@@ -770,7 +862,10 @@ def apply_writeback(
             }
         )
 
-    if updates:
+    if dry_run:
+        backup_file = None
+        wb.close()
+    elif updates:
         backup_dir = project_excel.parent / "备份"
         backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -780,30 +875,34 @@ def apply_writeback(
         wb.close()
     else:
         backup_file = None
+        wb.close()
 
-    inventory_report = None
-    try:
-        mill_inventories: dict[str, list[Any]] = {}
-        for path in source_json_paths:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-            input_file = str(meta.get("input_file") or "").strip()
-            company = _extract_company_from_filename(input_file or path.name)
-            if not company:
-                continue
-            inv_items = load_inventory_from_sources([path], company)
-            if inv_items:
-                mill_inventories[company] = inv_items
-        if mill_inventories:
-            inventory_report = apply_inventory_to_project(
-                project_excel=project_excel,
-                mill_inventories=mill_inventories,
-                sheet_name="报价表",
-                mapping_json_path=mapping_json_path,
-                clear_existing_colors=True,
-            )
-    except Exception as exc:
-        inventory_report = {"status": "error", "error": str(exc)}
+    if dry_run:
+        inventory_report = {"status": "skipped", "reason": "dry-run模式不修改库存颜色"}
+    else:
+        inventory_report = None
+        try:
+            mill_inventories: dict[str, list[Any]] = {}
+            for path in source_json_paths:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+                input_file = str(meta.get("input_file") or "").strip()
+                company = _extract_company_from_filename(input_file or path.name)
+                if not company:
+                    continue
+                inv_items = load_inventory_from_sources([path], company)
+                if inv_items:
+                    mill_inventories[company] = inv_items
+            if mill_inventories:
+                inventory_report = apply_inventory_to_project(
+                    project_excel=project_excel,
+                    mill_inventories=mill_inventories,
+                    sheet_name="报价表",
+                    mapping_json_path=mapping_json_path,
+                    clear_existing_colors=True,
+                )
+        except Exception as exc:
+            inventory_report = {"status": "error", "error": str(exc)}
 
     report = {
         "phase": "apply",
@@ -812,6 +911,7 @@ def apply_writeback(
         "mapping_json": str(mapping_json_path),
         "mapping_row_count": len(mapping_rows),
         "deduped_row_count": deduped_row_count,
+        "dry_run": dry_run,
         "updated_count": len(updates),
         "skipped_count": len(skipped),
         "backup_file": str(backup_file) if backup_file else None,

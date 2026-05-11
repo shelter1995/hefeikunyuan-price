@@ -12,6 +12,20 @@
 
 ## 完整流程（mode=both）
 
+### 安全执行顺序
+
+任何模型执行更新时必须先跑 dry-run：
+
+```powershell
+python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mode both --dry-run --headless
+```
+
+确认无待确认、无偏差异常，并经用户确认后，才允许真实写入：
+
+```powershell
+python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mode both --confirm-write --headless
+```
+
 ### 步骤1：前置准备
 1. **文件路径确认**：用 `Glob` 或 `LS` 工具确认 `项目报价/` 目录下的**实际文件名**，以磁盘上的名字为准，禁止增删任何字符。
 2. 从文件名提取 `地点1`（用于网价）和 `地点2`（用于图片/文档）。

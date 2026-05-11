@@ -61,6 +61,32 @@ python skills/quote-update/scripts/run_batch.py `
 ### 只更新线下报价
 把 `--mode both` 改为 `--mode image_doc`。
 
+### 安全执行（先预演，再写入）
+默认必须先运行 dry-run：
+
+```powershell
+python skills/quote-update/scripts/run_single.py `
+  --project "项目报价/<项目Excel路径>" `
+  --mode both `
+  --dry-run `
+  --headless
+```
+
+确认报告无待确认/无异常后，再允许真实写入：
+
+```powershell
+python skills/quote-update/scripts/run_single.py `
+  --project "项目报价/<项目Excel路径>" `
+  --mode both `
+  --confirm-write `
+  --headless
+```
+
+线下报价价格校验以项目文件中同厂家 sheet 的网价为动态参考：H3(盘螺) 对比 G3，H4(螺纹) 对比 G4。任一价格与网价的差值超过 1000 元/吨或偏离比例超过 20% 时，不自动回写，报告为“线下价与网价偏差过大”，需要人工确认。若 G3/G4 没有可用网价，允许回写，但报告备注“无网价参考”。
+
+### 低能力模型/外部Agent执行限制
+低能力模型不得直接修改 Excel，也不得手动拼写单元格更新。统一入口是 `skills/quote-update/scripts/run_single.py` 或 `run_batch.py`。默认先 `--dry-run`，用户确认后才可 `--confirm-write`。任何待确认、异常偏差、缺少网价参考、电议或脚本错误都必须停止并报告。
+
 ## 5. 执行规则（已固化）
 
 ### 5.0 结果返回格式规范（必须严格遵守）

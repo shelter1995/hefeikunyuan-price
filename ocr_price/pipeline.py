@@ -29,6 +29,7 @@ from .writeback_image_doc import (
     prepare_mapping as prepare_image_mapping,
 )
 from .reporting import render_single_report_markdown
+from .audit import audit_image_doc_updates
 from .xlsx_utils import load_workbook_safe
 
 SKIP_SHEETS = {"报价表"}
@@ -442,6 +443,7 @@ def _web_flow(
     password: str | None,
     headless: bool,
     artifact_dir: Path,
+    apply_if_ready: bool = True,
 ) -> dict[str, Any]:
     fetch_report_path = artifact_dir / f"网价提取报告_{location}_{_ts()}.json"
     raw_tmp = artifact_dir / f"_tmp_{location}_网价清单_{_ts()}.xlsx"
@@ -503,6 +505,15 @@ def _web_flow(
     if pending_csv.exists():
         shutil.copy2(pending_csv, official_csv)
 
+    if not apply_if_ready:
+        return {
+            "status": "prepared",
+            "phase": "web_prepare",
+            "fetch_report": str(fetch_report_path),
+            "prepare_report": str(prepare_report_path),
+            "reason": "dry-run模式不写入项目Excel",
+        }
+
     apply_report_path = artifact_dir / f"网价回写报告_{location}_{_ts()}.json"
     apply_report = apply_web_writeback(
         project_excel=project,
@@ -538,6 +549,7 @@ def _image_flow(
     source_jsons: list[Path],
     artifact_dir: Path,
     apply_if_ready: bool = True,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     if not source_jsons:
         return {"status": "skipped", "reason": "未提供图片/文档来源json"}
@@ -605,6 +617,7 @@ def _image_flow(
         mapping_json_path=confirmed_json if reusable or confirmed_json.exists() else pending_json,
         location=_city(location),
         report_out=apply_report_path,
+        dry_run=dry_run,
     )
     if apply_report.get("blocked"):
         return {
@@ -614,12 +627,16 @@ def _image_flow(
             "reason": str(apply_report.get("blocked_reason") or "图片/文档回写被阻断"),
         }
     apply_summary = _image_apply_summary(apply_report)
+    audit_report = None
+    if not apply_report.get("dry_run") and apply_summary.get("updated_items"):
+        audit_report = audit_image_doc_updates(project, apply_report.get("updates") or [])
     return {
         "status": "ok",
         "phase": "image_apply",
         "apply_report": str(apply_report_path),
         "reused_confirmed_mapping": reusable,
         "apply_summary": apply_summary,
+        "audit_report": audit_report,
     }
 
 
@@ -696,6 +713,7 @@ def run_single(
     image_inputs: list[Path],
     image_jsons: list[Path],
     artifact_dir: Path,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     web_location, image_location = _safe_locations(project)
@@ -719,6 +737,7 @@ def run_single(
             password=password,
             headless=headless,
             artifact_dir=artifact_dir,
+            apply_if_ready=not dry_run,
         )
         web_pending = result["web"].get("status") == "pending_confirmation"
 
@@ -743,6 +762,7 @@ def run_single(
             source_jsons=json_sources,
             artifact_dir=artifact_dir,
             apply_if_ready=not image_prepare_only,
+            dry_run=dry_run,
         )
 
     if result.get("web", {}).get("status") == "pending_confirmation" or result.get("image_doc", {}).get("status") == "pending_confirmation":
@@ -771,6 +791,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_single.add_argument("--image-inputs", nargs="*", default=[], help="图片/文档原始文件（自动先OCR）")
     p_single.add_argument("--image-jsons", nargs="*", default=[], help="已提取的OCR结果json列表")
     p_single.add_argument("--artifact-dir", default="运行产物", help="产物目录")
+    p_single.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
+    p_single.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
     p_single.add_argument("--report-out", help="单文件总结报告路径")
 
     p_batch = sub.add_parser("batch", help="批量更新")
@@ -785,6 +807,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--headless", action="store_true", help="网价抓取使用无头浏览器")
     p_batch.add_argument("--image-source-map", help="批量图片源映射json：{项目文件名:[json或原始文件...]}")
     p_batch.add_argument("--artifact-dir", default="运行产物", help="产物目录")
+    p_batch.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
+    p_batch.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
     p_batch.add_argument("--report-out", help="批量总结报告路径")
     return p
 
@@ -813,6 +837,8 @@ def _default_offline_sources(offline_dir: Path = DEFAULT_OFFLINE_DIR) -> list[st
 
 def main() -> int:
     args = _build_parser().parse_args()
+    if not args.dry_run and not args.confirm_write:
+        raise SystemExit("为防止误操作，写入项目Excel必须显式传入 --confirm-write；预演请使用 --dry-run。")
     artifact_base_dir = Path(args.artifact_dir)
     artifact_base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -838,6 +864,7 @@ def main() -> int:
             image_inputs=image_inputs,
             image_jsons=image_jsons,
             artifact_dir=project_artifact_dir,
+            dry_run=args.dry_run,
         )
         report_out = (
             Path(args.report_out)
@@ -893,6 +920,7 @@ def main() -> int:
                 image_inputs=img_inputs,
                 image_jsons=img_jsons,
                 artifact_dir=project_artifact_dir,
+                dry_run=args.dry_run,
             )
             summary["results"].append(result)
             _print_result_details(result)

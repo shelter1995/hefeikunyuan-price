@@ -23,6 +23,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--image-inputs", nargs="*", default=[], help="图片/文档原始文件")
     p.add_argument("--image-jsons", nargs="*", default=[], help="已提取OCR json")
     p.add_argument("--artifact-dir", default="运行产物", help="产物目录")
+    p.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
+    p.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
     p.add_argument("--report-out", help="总结报告路径")
     return p
 
@@ -54,6 +56,10 @@ def main() -> int:
         cmd.extend(["--password", args.password])
     if args.headless:
         cmd.append("--headless")
+    if args.dry_run:
+        cmd.append("--dry-run")
+    if args.confirm_write:
+        cmd.append("--confirm-write")
     if args.image_inputs:
         cmd.append("--image-inputs")
         cmd.extend(args.image_inputs)

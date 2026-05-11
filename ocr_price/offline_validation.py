@@ -4,8 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-PRICE_MIN = 2000
-PRICE_MAX = 6000
+HARD_PRICE_MIN = 1000
+HARD_PRICE_MAX = 10000
 VALID_INVENTORY_STATUSES = frozenset({"充足", "告警", "缺货"})
 
 
@@ -91,10 +91,11 @@ def validate_offline_payload(payload: dict[str, Any], target_location: str) -> O
             if price is None:
                 errors.append(f"records[{idx}].{field} must be an integer")
                 continue
-            if not (PRICE_MIN <= price <= PRICE_MAX):
-                errors.append(
-                    f"records[{idx}].{field} out of range [{PRICE_MIN}, {PRICE_MAX}]"
-                )
+            if price < HARD_PRICE_MIN:
+                errors.append(f"records[{idx}].{field} below hard minimum {HARD_PRICE_MIN}")
+                continue
+            if price > HARD_PRICE_MAX:
+                errors.append(f"records[{idx}].{field} above hard maximum {HARD_PRICE_MAX}")
 
     if records and target_location and not found_target:
         errors.append("target location not found in records")

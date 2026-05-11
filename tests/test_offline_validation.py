@@ -33,12 +33,20 @@ def test_validate_offline_payload_valid() -> None:
     assert result.errors == []
 
 
-def test_validate_offline_payload_out_of_range_price() -> None:
+def test_validate_offline_payload_allows_market_price_outside_old_fixed_range() -> None:
     payload = _base_payload()
-    payload["records"][0]["rebar_price"] = 1999
+    payload["records"][0]["rebar_price"] = 6500
+    result = validate_offline_payload(payload, target_location="蚌埠")
+    assert result.is_valid is True
+    assert result.errors == []
+
+
+def test_validate_offline_payload_rejects_non_price_integer() -> None:
+    payload = _base_payload()
+    payload["records"][0]["coil_price"] = 86
     result = validate_offline_payload(payload, target_location="蚌埠")
     assert result.is_valid is False
-    assert any("out of range" in err for err in result.errors)
+    assert any("below hard minimum" in err for err in result.errors)
 
 
 def test_validate_offline_payload_missing_target_location() -> None:
@@ -61,7 +69,7 @@ def test_load_source_prices_skips_invalid_payload(tmp_path: Path) -> None:
     valid = _base_payload()
     invalid = _base_payload()
     invalid["meta"]["input_file"] = "金虹4.13.jpg"
-    invalid["records"][0]["coil_price"] = 9999
+    invalid["records"][0]["coil_price"] = 10001
 
     valid_path = tmp_path / "valid.json"
     invalid_path = tmp_path / "invalid.json"
