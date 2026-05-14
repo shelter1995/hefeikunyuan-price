@@ -31,8 +31,10 @@ python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mo
 确认无待确认、无偏差异常，并经用户确认后，才允许真实写入：
 
 ```powershell
-python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mode both --confirm-write --headless
+python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mode both --confirm-write --headless --manifest "运行产物/<项目名>/dry_run_manifest.json"
 ```
+
+如果 dry-run 没有输出 `Manifest:`，不得执行 confirm-write。
 
 `--confirm-write` 默认复用 dry-run 产物直接 apply。仅在需要重抓网价或重跑OCR时，才追加：
 - `--refresh-web-artifacts`
@@ -137,7 +139,7 @@ python skills/quote-update/scripts/run_single.py --project "<项目文件>" --mo
     ├─ 网价更新明细（G1/G3/G4）
     ├─ 图片/文档更新明细（H1/H3/H4）
     ├─ 部分更新项（如有）
-    ├─ 【新增】库存颜色统计（蓝色X个 / 黄色X个 / 红色X个）
+    ├─ 【新增】库存颜色标注明细（厂家 | 钢材型号和规格 | 库存情况 | 单元格）
     ├─ 汇总统计表
     └─ 报告文件路径
 ```

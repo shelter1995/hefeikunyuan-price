@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
+import os
 import sys
 from pathlib import Path
 
@@ -35,47 +35,56 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _build_parser().parse_args()
     root = _repo_root()
-    cmd = [
-        sys.executable,
-        "-m",
-        "ocr_price.pipeline",
-        "batch",
-        "--project-dir",
-        args.project_dir,
-        "--glob",
-        args.glob,
-        "--mode",
-        args.mode,
-        "--account-file",
-        args.account_file,
-        "--artifact-dir",
-        args.artifact_dir,
-    ]
-    if args.list_url:
-        cmd.extend(["--list-url", args.list_url])
-    if args.detail_url:
-        cmd.extend(["--detail-url", args.detail_url])
-    if args.username:
-        cmd.extend(["--username", args.username])
-    if args.password:
-        cmd.extend(["--password", args.password])
-    if args.headless:
-        cmd.append("--headless")
-    if args.manual_login_timeout != 180:
-        cmd.extend(["--manual-login-timeout", str(args.manual_login_timeout)])
-    if args.dry_run:
-        cmd.append("--dry-run")
-    if args.confirm_write:
-        cmd.append("--confirm-write")
-    if args.refresh_web_artifacts:
-        cmd.append("--refresh-web-artifacts")
-    if args.refresh_image_artifacts:
-        cmd.append("--refresh-image-artifacts")
-    if args.image_source_map:
-        cmd.extend(["--image-source-map", args.image_source_map])
-    if args.report_out:
-        cmd.extend(["--report-out", args.report_out])
-    return subprocess.run(cmd, cwd=root).returncode
+    old_cwd = Path.cwd()
+    old_argv = sys.argv[:]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        os.chdir(root)
+        sys.argv = [
+            "ocr_price.pipeline",
+            "batch",
+            "--project-dir",
+            args.project_dir,
+            "--glob",
+            args.glob,
+            "--mode",
+            args.mode,
+            "--account-file",
+            args.account_file,
+            "--artifact-dir",
+            args.artifact_dir,
+        ]
+        if args.list_url:
+            sys.argv.extend(["--list-url", args.list_url])
+        if args.detail_url:
+            sys.argv.extend(["--detail-url", args.detail_url])
+        if args.username:
+            sys.argv.extend(["--username", args.username])
+        if args.password:
+            sys.argv.extend(["--password", args.password])
+        if args.headless:
+            sys.argv.append("--headless")
+        if args.manual_login_timeout != 180:
+            sys.argv.extend(["--manual-login-timeout", str(args.manual_login_timeout)])
+        if args.dry_run:
+            sys.argv.append("--dry-run")
+        if args.confirm_write:
+            sys.argv.append("--confirm-write")
+        if args.refresh_web_artifacts:
+            sys.argv.append("--refresh-web-artifacts")
+        if args.refresh_image_artifacts:
+            sys.argv.append("--refresh-image-artifacts")
+        if args.image_source_map:
+            sys.argv.extend(["--image-source-map", args.image_source_map])
+        if args.report_out:
+            sys.argv.extend(["--report-out", args.report_out])
+        from ocr_price import pipeline
+
+        return pipeline.main()
+    finally:
+        sys.argv = old_argv
+        os.chdir(old_cwd)
 
 
 if __name__ == "__main__":

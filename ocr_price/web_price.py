@@ -842,13 +842,31 @@ def fetch_web_prices(
     with sync_playwright() as p:
         browser, context, page, connection_type = _launch_browser_with_state(p, headless)
 
-        proof = _login(
-            page,
-            user,
-            pwd,
-            allow_manual_login=not headless,
-            manual_login_timeout_seconds=manual_login_timeout_seconds,
-        )
+        try:
+            proof = _login(
+                page,
+                user,
+                pwd,
+                allow_manual_login=not headless,
+                manual_login_timeout_seconds=manual_login_timeout_seconds,
+            )
+        except WebPriceError:
+            if connection_type == "cdp":
+                raise
+            print(
+                "[web_price] 无头模式登录失败，将关闭并重新启动有头浏览器，"
+                "请在弹出的浏览器窗口中手动完成登录。"
+            )
+            browser.close()
+            browser, context, page, connection_type = _launch_browser_with_state(p, headless=False)
+            proof = _login(
+                page,
+                user,
+                pwd,
+                allow_manual_login=True,
+                manual_login_timeout_seconds=manual_login_timeout_seconds,
+            )
+
         url = detail_url or _latest_url_from_list(page, str(list_page), city)
         page.goto(url, timeout=60000, wait_until="networkidle")
         rows = _extract_detail_rows(page)
@@ -881,7 +899,15 @@ def fetch_web_prices(
         "source_mode": "web",
     }
     report_out.parent.mkdir(parents=True, exist_ok=True)
-    report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_out.write_text(
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            indent=2,
+            default=lambda obj: obj.isoformat() if isinstance(obj, (datetime, date)) else str(obj),
+        ),
+        encoding="utf-8",
+    )
     return report
 
 def prepare_web_mapping(
@@ -1002,7 +1028,15 @@ def prepare_web_mapping(
         "needs_user_confirmation": needs_confirm,
     }
     report_out.parent.mkdir(parents=True, exist_ok=True)
-    report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_out.write_text(
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            indent=2,
+            default=lambda obj: obj.isoformat() if isinstance(obj, (datetime, date)) else str(obj),
+        ),
+        encoding="utf-8",
+    )
     return report
 
 
@@ -1085,7 +1119,15 @@ def apply_web_writeback(
             "skipped": [],
         }
         report_out.parent.mkdir(parents=True, exist_ok=True)
-        report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_out.write_text(
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                indent=2,
+                default=lambda obj: obj.isoformat() if isinstance(obj, (datetime, date)) else str(obj),
+            ),
+            encoding="utf-8",
+        )
         return report
 
     wb = load_workbook_safe(project_excel)
@@ -1302,7 +1344,15 @@ def main() -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(output), str(target))
             report["raw_price_excel"] = str(target)
-            report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            report_out.write_text(
+                json.dumps(
+                    report,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=lambda obj: obj.isoformat() if isinstance(obj, (datetime, date)) else str(obj),
+                ),
+                encoding="utf-8",
+            )
             output = target
         print(f"Raw Excel: {output}")
         print(f"Quote Date: {report['quote_date']}")

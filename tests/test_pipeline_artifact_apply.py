@@ -138,3 +138,60 @@ def test_web_apply_from_artifacts_blocks_when_mapping_pending(tmp_path: Path):
 
     result = pipeline._web_apply_from_artifacts(project=project, location="安徽合肥", artifact_dir=artifact_dir)
     assert result["status"] == "pending_confirmation"
+
+
+def test_run_single_confirm_write_uses_manifest_paths(monkeypatch, tmp_path: Path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "project": str(tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx"),
+                "artifact_dir": str(tmp_path / "artifacts"),
+                "web": {
+                    "location": "安徽合肥",
+                    "mapping_json": str(tmp_path / "artifacts" / "厂家对照表_安徽合肥_已确认.json"),
+                    "raw_price_excel": str(tmp_path / "artifacts" / "安徽合肥2026-05-13建筑钢材原料价格清单.xlsx"),
+                },
+                "image_doc": {
+                    "location": "安徽蚌埠",
+                    "mapping_json": str(tmp_path / "artifacts" / "图片文档厂家对照表_安徽蚌埠_已确认.json"),
+                    "source_jsons": [str(tmp_path / "artifacts" / "ocr价格提取_桂鑫报价.json")],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def fake_web_apply_from_manifest(*args, **kwargs):
+        seen["web_manifest"] = kwargs["manifest"]["web"]["raw_price_excel"]
+        return {"status": "ok", "apply_summary": _ok_summary()}
+
+    def fake_image_apply_from_manifest(*args, **kwargs):
+        seen["image_manifest"] = kwargs["manifest"]["image_doc"]["source_jsons"]
+        return {"status": "ok", "apply_summary": _ok_summary()}
+
+    monkeypatch.setattr(pipeline, "_web_apply_from_manifest", fake_web_apply_from_manifest)
+    monkeypatch.setattr(pipeline, "_image_apply_from_manifest", fake_image_apply_from_manifest)
+
+    result = pipeline.run_single(
+        project=tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx",
+        mode="both",
+        list_url=None,
+        detail_url=None,
+        account_file=tmp_path / "网站账号密码.txt",
+        username=None,
+        password=None,
+        headless=True,
+        image_inputs=[],
+        image_jsons=[],
+        artifact_dir=tmp_path / "artifacts",
+        dry_run=False,
+        confirm_write=True,
+        manifest_path=manifest,
+    )
+
+    assert result["status"] == "ok"
+    assert seen["web_manifest"].endswith("建筑钢材原料价格清单.xlsx")
+    assert seen["image_manifest"][0].endswith("ocr价格提取_桂鑫报价.json")

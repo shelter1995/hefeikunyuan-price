@@ -5,6 +5,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
+from ocr_price import pipeline
 from ocr_price.writeback_image_doc import apply_writeback
 
 
@@ -69,3 +70,42 @@ def test_apply_writeback_dry_run_does_not_modify_workbook(tmp_path: Path):
     assert ws["H3"].value == 3300
     assert ws["H4"].value == 3100
     wb.close()
+
+
+def test_file_sha256_changes_when_file_changes(tmp_path: Path):
+    path = tmp_path / "project.xlsx"
+    path.write_bytes(b"before")
+    before = pipeline._file_sha256(path)
+
+    path.write_bytes(b"after")
+    after = pipeline._file_sha256(path)
+
+    assert before != after
+
+
+def test_assert_dry_run_unchanged_raises_on_modified_file(tmp_path: Path):
+    path = tmp_path / "project.xlsx"
+    path.write_bytes(b"before")
+    before = pipeline._file_sha256(path)
+    path.write_bytes(b"after")
+
+    try:
+        pipeline._assert_dry_run_unchanged(path, before)
+    except RuntimeError as exc:
+        assert "dry-run 修改了项目 Excel" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError when dry-run changes the workbook")
+
+
+def test_pipeline_lock_blocks_existing_active_lock(tmp_path: Path):
+    lock_path = tmp_path / ".quote_update.lock"
+    lock_path.write_text(
+        json.dumps({"pid": 999999, "project": "project.xlsx"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    try:
+        with pipeline._pipeline_lock(lock_path, project=tmp_path / "project.xlsx"):
+            raise AssertionError("lock should block")
+    except RuntimeError as exc:
+        assert "已有报价更新任务锁" in str(exc)

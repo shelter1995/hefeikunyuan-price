@@ -4,6 +4,32 @@ from pathlib import Path
 from typing import Any
 
 
+def _inventory_spec_text(item: dict[str, Any]) -> str:
+    parts = [
+        str(item.get("product") or "").strip(),
+        str(item.get("spec") or "").strip(),
+        str(item.get("length") or "").strip(),
+        str(item.get("material") or "").strip(),
+    ]
+    return " ".join(x for x in parts if x) or "未识别规格"
+
+
+def _inventory_rows(inventory_report: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for item in inventory_report.get("applied", []) or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "mill": str(item.get("sheet_mill") or item.get("mill") or ""),
+                "spec": _inventory_spec_text(item),
+                "status": str(item.get("status") or ""),
+                "cell": str(item.get("cell") or ""),
+            }
+        )
+    return rows
+
+
 def _change(cell: dict[str, Any] | None) -> str:
     if not isinstance(cell, dict):
         return "空 → 空"
@@ -82,6 +108,22 @@ def render_single_report_markdown(result: dict[str, Any], json_report_path: str)
     image_doc = result.get("image_doc")
     if isinstance(image_doc, dict) and image_doc.get("status") == "ok":
         lines.extend(_section("2. 图片/文档价更新（H1/H3/H4）", "H", image_doc.get("apply_summary") or {}))
+
+    # Inventory color report
+    inventory_report = image_doc.get("inventory_report") if isinstance(image_doc, dict) else None
+    if isinstance(inventory_report, dict) and inventory_report.get("status") == "ok":
+        rows = _inventory_rows(inventory_report)
+        lines.append("")
+        lines.append("### 3. 库存颜色标注明细")
+        lines.append("")
+        lines.append("| 厂家 | 钢材型号和规格 | 库存情况 | 单元格 |")
+        lines.append("|------|----------------|----------|--------|")
+        if rows:
+            for row in rows:
+                lines.append(f"| {row['mill']} | {row['spec']} | {row['status']} | {row['cell']} |")
+        else:
+            lines.append("| 无 | 无 | 无 | 无 |")
+        lines.append("")
 
     lines.extend(
         [

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -64,6 +66,84 @@ def _json_write(path: Path, payload: Any) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _assert_dry_run_unchanged(project: Path, before_hash: str) -> None:
+    after_hash = _file_sha256(project)
+    if after_hash != before_hash:
+        raise RuntimeError(
+            f"dry-run 修改了项目 Excel，禁止继续：{project} before={before_hash} after={after_hash}"
+        )
+
+
+@contextmanager
+def _pipeline_lock(lock_path: Path, project: Path):
+    if lock_path.exists():
+        raise RuntimeError(f"已有报价更新任务锁，请先人工确认并清理：{lock_path}")
+    payload = {
+        "pid": os.getpid(),
+        "project": str(project),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _json_write(lock_path, payload)
+    try:
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _manifest_path(artifact_dir: Path) -> Path:
+    return artifact_dir / "dry_run_manifest.json"
+
+
+def _write_manifest(path: Path, result: dict[str, Any], artifact_dir: Path) -> None:
+    manifest = {
+        "project": result.get("project"),
+        "artifact_dir": str(artifact_dir),
+        "mode": result.get("mode"),
+        "started_at": result.get("started_at"),
+        "ended_at": result.get("ended_at"),
+        "project_excel_hash_before": result.get("project_excel_hash_before"),
+        "project_excel_hash_after": result.get("project_excel_hash_after"),
+        "web": result.get("web"),
+        "image_doc": result.get("image_doc"),
+    }
+    _json_write(path, manifest)
+
+
+def _read_manifest(path: Path) -> dict[str, Any]:
+    payload = _json_read(path)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"manifest不是JSON对象：{path}")
+    return payload
+
+
+def _web_apply_from_manifest(project: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    artifact_dir = Path(str(manifest.get("artifact_dir") or ""))
+    web = manifest.get("web") if isinstance(manifest.get("web"), dict) else {}
+    location = str(web.get("location") or manifest.get("web_location") or "")
+    if not artifact_dir.exists():
+        raise RuntimeError(f"manifest产物目录不存在：{artifact_dir}")
+    return _web_apply_from_artifacts(project=project, location=location, artifact_dir=artifact_dir)
+
+
+def _image_apply_from_manifest(project: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    artifact_dir = Path(str(manifest.get("artifact_dir") or ""))
+    image_doc = manifest.get("image_doc") if isinstance(manifest.get("image_doc"), dict) else {}
+    location = str(image_doc.get("location") or manifest.get("image_location") or "")
+    source_jsons = [Path(x) for x in image_doc.get("source_jsons", []) or []]
+    return _image_apply_from_artifacts(project=project, location=location, artifact_dir=artifact_dir, source_jsons=source_jsons)
 
 
 def _mapping_has_pending(path: Path) -> bool:
@@ -400,6 +480,16 @@ def _generate_inventory_report(inventory_report: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def _format_change(cell: Any) -> str:
+    if not isinstance(cell, dict):
+        return "空 → 空"
+    old = cell.get("old")
+    new = cell.get("new")
+    old_text = str(old) if old is not None else "空"
+    new_text = str(new) if new is not None else "空"
+    return f"{old_text} → {new_text}"
+
+
 def _print_flow_details(flow_name: str, flow: Any) -> None:
     if not isinstance(flow, dict):
         return
@@ -421,7 +511,21 @@ def _print_flow_details(flow_name: str, flow: Any) -> None:
         f"Skipped={summary.get('skipped_count', 0)}"
     )
     for row in summary.get("updated_items", []) or []:
-        print(f"{flow_name} UpdatedItem: {json.dumps(row, ensure_ascii=False)}")
+        if flow_name == "Web":
+            line = (
+                f"{row.get('项目文件Sheet', '')} | {row.get('来源厂家', '')} | "
+                f"G1: {_format_change(row.get('G1'))} | "
+                f"G3: {_format_change(row.get('G3'))} | "
+                f"G4: {_format_change(row.get('G4'))}"
+            )
+        else:
+            line = (
+                f"{row.get('项目文件Sheet', '')} | {row.get('来源厂家', '')} | "
+                f"H1: {_format_change(row.get('H1'))} | "
+                f"H3: {_format_change(row.get('H3'))} | "
+                f"H4: {_format_change(row.get('H4'))}"
+            )
+        print(f"{flow_name} UpdatedItem: {line}")
     for row in summary.get("skipped_items", []) or []:
         print(f"{flow_name} SkippedItem: {json.dumps(row, ensure_ascii=False)}")
 
@@ -581,6 +685,7 @@ def _image_apply_from_artifacts(
     audit_report = None
     if apply_summary.get("updated_items"):
         audit_report = audit_image_doc_updates(project, apply_report.get("updates") or [])
+    inventory_report = apply_report.get("inventory_report")
     return {
         "status": "ok",
         "phase": "image_apply",
@@ -588,6 +693,7 @@ def _image_apply_from_artifacts(
         "source_mode": "reuse_artifacts",
         "apply_summary": apply_summary,
         "audit_report": audit_report,
+        "inventory_report": inventory_report,
     }
 
 
@@ -878,8 +984,10 @@ def run_single(
     refresh_web_artifacts: bool = False,
     refresh_image_artifacts: bool = False,
     manual_login_timeout_seconds: int = 180,
+    manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    project_before_hash = _file_sha256(project) if dry_run and project.exists() else None
     web_location, image_location = _safe_locations(project)
     result: dict[str, Any] = {
         "project": str(project),
@@ -889,9 +997,12 @@ def run_single(
         "started_at": datetime.now().isoformat(timespec="seconds"),
     }
 
+    manifest = _read_manifest(manifest_path) if manifest_path else None
     web_pending = False
     if mode in {"web", "both"}:
-        if confirm_write and not refresh_web_artifacts:
+        if confirm_write and manifest is not None and not refresh_web_artifacts:
+            result["web"] = _web_apply_from_manifest(project=project, manifest=manifest)
+        elif confirm_write and not refresh_web_artifacts:
             result["web"] = _web_apply_from_artifacts(
                 project=project,
                 location=web_location,
@@ -914,7 +1025,9 @@ def run_single(
         web_pending = result["web"].get("status") == "pending_confirmation"
 
     if mode in {"image_doc", "both"}:
-        if confirm_write and not refresh_image_artifacts:
+        if confirm_write and manifest is not None and not refresh_image_artifacts:
+            result["image_doc"] = _image_apply_from_manifest(project=project, manifest=manifest)
+        elif confirm_write and not refresh_image_artifacts:
             result["image_doc"] = _image_apply_from_artifacts(
                 project=project,
                 location=image_location,
@@ -945,10 +1058,18 @@ def run_single(
     if result.get("web", {}).get("status") == "pending_confirmation" or result.get("image_doc", {}).get("status") == "pending_confirmation":
         result["status"] = "pending_confirmation"
         result["ended_at"] = datetime.now().isoformat(timespec="seconds")
+        if dry_run and project_before_hash is not None:
+            _assert_dry_run_unchanged(project, project_before_hash)
+            result["project_excel_hash_before"] = project_before_hash
+            result["project_excel_hash_after"] = _file_sha256(project)
         return result
 
     result["status"] = "ok"
     result["ended_at"] = datetime.now().isoformat(timespec="seconds")
+    if dry_run and project_before_hash is not None:
+        _assert_dry_run_unchanged(project, project_before_hash)
+        result["project_excel_hash_before"] = project_before_hash
+        result["project_excel_hash_after"] = _file_sha256(project)
     return result
 
 
@@ -973,6 +1094,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_single.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
     p_single.add_argument("--refresh-web-artifacts", action="store_true", help="confirm-write时强制重跑网价抓取与对照生成")
     p_single.add_argument("--refresh-image-artifacts", action="store_true", help="confirm-write时强制重跑OCR与图片文档对照生成")
+    p_single.add_argument("--manifest", help="dry-run生成的manifest路径；confirm-write默认必须复用它")
     p_single.add_argument("--report-out", help="单文件总结报告路径")
 
     p_batch = sub.add_parser("batch", help="批量更新")
@@ -992,6 +1114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
     p_batch.add_argument("--refresh-web-artifacts", action="store_true", help="confirm-write时强制重跑网价抓取与对照生成")
     p_batch.add_argument("--refresh-image-artifacts", action="store_true", help="confirm-write时强制重跑OCR与图片文档对照生成")
+    p_batch.add_argument("--manifest", help="dry-run生成的manifest路径；单文件建议使用，批量后续拆分支持")
     p_batch.add_argument("--report-out", help="批量总结报告路径")
     return p
 
@@ -1030,6 +1153,7 @@ def main() -> int:
     if args.command == "single":
         project_path = Path(args.project)
         project_artifact_dir = _project_artifact_dir(artifact_base_dir, project_path)
+        lock_path = artifact_base_dir / ".quote_update.lock"
         image_inputs = [Path(x) for x in args.image_inputs]
         image_jsons = [Path(x) for x in args.image_jsons]
         auto_collect_sources = (
@@ -1043,37 +1167,43 @@ def main() -> int:
             auto_inputs, auto_jsons = _split_image_sources(auto_sources)
             image_inputs = auto_inputs
             image_jsons = auto_jsons
-        result = run_single(
-            project=project_path,
-            mode=args.mode,
-            list_url=args.list_url,
-            detail_url=args.detail_url,
-            account_file=Path(args.account_file),
-            username=args.username,
-            password=args.password,
-            headless=args.headless,
-            image_inputs=image_inputs,
-            image_jsons=image_jsons,
-            artifact_dir=project_artifact_dir,
-            dry_run=args.dry_run,
-            confirm_write=args.confirm_write,
-            refresh_web_artifacts=args.refresh_web_artifacts,
-            refresh_image_artifacts=args.refresh_image_artifacts,
-            manual_login_timeout_seconds=args.manual_login_timeout,
-        )
-        report_out = (
-            Path(args.report_out)
-            if args.report_out
-            else project_artifact_dir / f"完整更新报告_single_{project_path.stem}_{_ts()}.json"
-        )
-        _json_write(report_out, result)
-        markdown_report = render_single_report_markdown(result, json_report_path=str(report_out))
-        markdown_out = report_out.with_suffix(".md")
-        markdown_out.write_text(markdown_report, encoding="utf-8")
-        print(f"Status: {result['status']}")
-        print(f"Report: {report_out}")
-        print(f"MarkdownReport: {markdown_out}")
-        _print_result_details(result)
+        with _pipeline_lock(lock_path, project_path):
+            result = run_single(
+                project=project_path,
+                mode=args.mode,
+                list_url=args.list_url,
+                detail_url=args.detail_url,
+                account_file=Path(args.account_file),
+                username=args.username,
+                password=args.password,
+                headless=args.headless,
+                image_inputs=image_inputs,
+                image_jsons=image_jsons,
+                artifact_dir=project_artifact_dir,
+                dry_run=args.dry_run,
+                confirm_write=args.confirm_write,
+                refresh_web_artifacts=args.refresh_web_artifacts,
+                refresh_image_artifacts=args.refresh_image_artifacts,
+                manual_login_timeout_seconds=args.manual_login_timeout,
+                manifest_path=Path(args.manifest) if args.manifest else None,
+            )
+            if args.dry_run:
+                manifest_out = _manifest_path(project_artifact_dir)
+                _write_manifest(manifest_out, result, project_artifact_dir)
+                print(f"Manifest: {manifest_out}")
+            report_out = (
+                Path(args.report_out)
+                if args.report_out
+                else project_artifact_dir / f"完整更新报告_single_{project_path.stem}_{_ts()}.json"
+            )
+            _json_write(report_out, result)
+            markdown_report = render_single_report_markdown(result, json_report_path=str(report_out))
+            markdown_out = report_out.with_suffix(".md")
+            markdown_out.write_text(markdown_report, encoding="utf-8")
+            print(f"Status: {result['status']}")
+            print(f"Report: {report_out}")
+            print(f"MarkdownReport: {markdown_out}")
+            _print_result_details(result)
         return 0
 
     source_map = _json_read(Path(args.image_source_map)) if args.image_source_map else {}

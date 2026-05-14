@@ -72,6 +72,16 @@ def test_apply_inventory_uses_confirmed_mapping_and_clears_existing_colors(tmp_p
     assert result["applied_count"] == 1
     assert result["cleared_count"] >= 2
 
+    applied = result["applied"][0]
+    assert applied["mill"] == "来源钢厂"
+    assert applied["sheet_mill"] == "目标钢厂"
+    assert applied["product"] == "螺纹"
+    assert applied["spec"] == "12"
+    assert applied["length"] == "9"
+    assert applied["material"] == "HRB400E"
+    assert applied["status"] == "告警"
+    assert applied["cell"] == "E12"
+
     wb = load_workbook(project_path)
     ws = wb["报价表"]
     updated_cell = ws.cell(row=12, column=5)

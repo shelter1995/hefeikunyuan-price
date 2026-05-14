@@ -49,3 +49,58 @@ def test_render_single_report_markdown_contains_required_sections():
     assert "徐钢" in markdown
     assert "闽源" in markdown
     assert "运行产物/report.json" in markdown
+
+
+def test_render_single_report_markdown_lists_inventory_details():
+    result = {
+        "project": "项目报价/测试项目.xlsx",
+        "mode": "both",
+        "started_at": "2026-05-13T09:00:00",
+        "ended_at": "2026-05-13T09:02:00",
+        "status": "ok",
+        "image_doc": {
+            "status": "ok",
+            "apply_summary": {
+                "updated_count": 0,
+                "skipped_count": 0,
+                "updated_items": [],
+                "skipped_items": [],
+            },
+            "inventory_report": {
+                "status": "ok",
+                "cleared_count": 3,
+                "applied_count": 2,
+                "applied": [
+                    {
+                        "mill": "桂鑫报价",
+                        "sheet_mill": "桂鑫",
+                        "product": "螺纹",
+                        "spec": "12",
+                        "length": "9",
+                        "material": "HRB400E",
+                        "status": "充足",
+                        "cell": "P16",
+                    },
+                    {
+                        "mill": "贵航报价",
+                        "sheet_mill": "贵航",
+                        "product": "圆钢",
+                        "spec": "16",
+                        "length": "",
+                        "material": "",
+                        "status": "告警",
+                        "cell": "R18",
+                    },
+                ],
+            },
+        },
+    }
+
+    markdown = render_single_report_markdown(result, json_report_path="运行产物/report.json")
+
+    assert "### 3. 库存颜色标注明细" in markdown
+    assert "| 厂家 | 钢材型号和规格 | 库存情况 | 单元格 |" in markdown
+    assert "| 桂鑫 | 螺纹 12 9 HRB400E | 充足 | P16 |" in markdown
+    assert "| 贵航 | 圆钢 16 | 告警 | R18 |" in markdown
+    assert "蓝色（充足）" not in markdown
+    assert "新标注颜色：" not in markdown

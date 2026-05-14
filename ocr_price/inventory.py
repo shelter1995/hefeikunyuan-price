@@ -469,7 +469,11 @@ def apply_inventory_to_project(
                         "sheet_mill": resolved_mill,
                         "row": row_info["row"],
                         "col": target_col,
+                        "cell": ws.cell(row=row_info["row"], column=target_col).coordinate,
+                        "product": item.product,
                         "spec": item.spec,
+                        "length": item.length,
+                        "material": item.material,
                         "status": item.status,
                     })
                     break
