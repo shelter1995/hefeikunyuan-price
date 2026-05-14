@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from ocr_price import pipeline
@@ -195,3 +197,15 @@ def test_run_single_confirm_write_uses_manifest_paths(monkeypatch, tmp_path: Pat
     assert result["status"] == "ok"
     assert seen["web_manifest"].endswith("建筑钢材原料价格清单.xlsx")
     assert seen["image_manifest"][0].endswith("ocr价格提取_桂鑫报价.json")
+
+
+def test_run_batch_wrapper_exposes_manifest_argument():
+    script = Path(__file__).resolve().parents[1] / "skills" / "quote-update" / "scripts" / "run_batch.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert b"--manifest" in result.stdout

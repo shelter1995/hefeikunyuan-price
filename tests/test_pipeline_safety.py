@@ -109,3 +109,32 @@ def test_pipeline_lock_blocks_existing_active_lock(tmp_path: Path):
             raise AssertionError("lock should block")
     except RuntimeError as exc:
         assert "已有报价更新任务锁" in str(exc)
+
+
+def test_write_manifest_preserves_locations_and_image_sources(tmp_path: Path):
+    manifest_path = tmp_path / "dry_run_manifest.json"
+    artifact_dir = tmp_path / "artifacts"
+    source_json = artifact_dir / "ocr价格提取_桂鑫报价.json"
+    result = {
+        "project": "项目报价/安徽合肥-安徽蚌埠-测试.xlsx",
+        "mode": "both",
+        "started_at": "2026-05-14T09:00:00",
+        "ended_at": "2026-05-14T09:01:00",
+        "web_location": "安徽合肥",
+        "image_location": "安徽蚌埠",
+        "web": {"status": "prepared", "phase": "web_prepare"},
+        "image_doc": {
+            "status": "prepared",
+            "phase": "image_prepare",
+            "source_jsons": [str(source_json)],
+        },
+    }
+
+    pipeline._write_manifest(manifest_path, result, artifact_dir)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["web_location"] == "安徽合肥"
+    assert manifest["image_location"] == "安徽蚌埠"
+    assert manifest["web"]["location"] == "安徽合肥"
+    assert manifest["image_doc"]["location"] == "安徽蚌埠"
+    assert manifest["image_doc"]["source_jsons"] == [str(source_json)]

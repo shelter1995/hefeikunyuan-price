@@ -108,16 +108,26 @@ def _manifest_path(artifact_dir: Path) -> Path:
 
 
 def _write_manifest(path: Path, result: dict[str, Any], artifact_dir: Path) -> None:
+    web_location = str(result.get("web_location") or "").strip()
+    image_location = str(result.get("image_location") or "").strip()
+    web = dict(result.get("web") or {}) if isinstance(result.get("web"), dict) else None
+    image_doc = dict(result.get("image_doc") or {}) if isinstance(result.get("image_doc"), dict) else None
+    if web is not None and web_location and not web.get("location"):
+        web["location"] = web_location
+    if image_doc is not None and image_location and not image_doc.get("location"):
+        image_doc["location"] = image_location
     manifest = {
         "project": result.get("project"),
         "artifact_dir": str(artifact_dir),
         "mode": result.get("mode"),
         "started_at": result.get("started_at"),
         "ended_at": result.get("ended_at"),
+        "web_location": web_location,
+        "image_location": image_location,
         "project_excel_hash_before": result.get("project_excel_hash_before"),
         "project_excel_hash_after": result.get("project_excel_hash_after"),
-        "web": result.get("web"),
-        "image_doc": result.get("image_doc"),
+        "web": web,
+        "image_doc": image_doc,
     }
     _json_write(path, manifest)
 
@@ -444,42 +454,6 @@ def _generate_image_report(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _generate_inventory_report(inventory_report: dict[str, Any] | None) -> str:
-    """生成库存颜色标注报告"""
-    if not inventory_report:
-        return ""
-    
-    lines: list[str] = []
-    lines.append("\n**【新增】库存颜色标注：**")
-    
-    # 统计各状态数量
-    status_counts = {"充足": 0, "告警": 0, "缺货": 0}
-    factory_details = []
-    
-    for file_info in inventory_report.get("factory_details", []) or []:
-        for detail in file_info.get("details", []) or []:
-            status = detail.get("status", "")
-            if status in status_counts:
-                status_counts[status] += 1
-    
-    lines.append(f"- 蓝色（充足）：{status_counts['充足']}个")
-    lines.append(f"- 黄色（告警）：{status_counts['告警']}个")
-    lines.append(f"- 红色（缺货）：{status_counts['缺货']}个")
-    
-    # 涉及厂家
-    factories = set()
-    for file_info in inventory_report.get("factory_details", []) or []:
-        file_name = file_info.get("file", "")
-        # 从文件名提取厂家名
-        factory = file_name.replace("ocr价格提取_", "").replace(".json", "")
-        factories.add(factory)
-    
-    if factories:
-        lines.append(f"- 涉及厂家：{', '.join(sorted(factories))}")
-    
-    return "\n".join(lines)
-
-
 def _format_change(cell: Any) -> str:
     if not isinstance(cell, dict):
         return "空 → 空"
@@ -759,6 +733,7 @@ def _web_flow(
         return {
             "status": "pending_confirmation",
             "phase": "web_prepare",
+            "location": location,
             "fetch_report": str(fetch_report_path),
             "prepare_report": str(prepare_report_path),
             "pending_mapping_json": str(pending_json),
@@ -775,6 +750,7 @@ def _web_flow(
         return {
             "status": "prepared",
             "phase": "web_prepare",
+            "location": location,
             "fetch_report": str(fetch_report_path),
             "prepare_report": str(prepare_report_path),
             "reason": "dry-run模式不写入项目Excel",
@@ -793,6 +769,7 @@ def _web_flow(
         return {
             "status": "pending_confirmation",
             "phase": "web_apply",
+            "location": location,
             "fetch_report": str(fetch_report_path),
             "prepare_report": str(prepare_report_path),
             "apply_report": str(apply_report_path),
@@ -802,6 +779,7 @@ def _web_flow(
     return {
         "status": "ok",
         "phase": "web_apply",
+        "location": location,
         "fetch_report": str(fetch_report_path),
         "prepare_report": str(prepare_report_path),
         "apply_report": str(apply_report_path),
@@ -818,7 +796,12 @@ def _image_flow(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     if not source_jsons:
-        return {"status": "skipped", "reason": "未提供图片/文档来源json"}
+        return {
+            "status": "skipped",
+            "location": location,
+            "source_jsons": [],
+            "reason": "未提供图片/文档来源json",
+        }
 
     confirmed_json = artifact_dir / f"图片文档厂家对照表_{location}_已确认.json"
     confirmed_csv = artifact_dir / f"图片文档厂家对照表_{location}_已确认.csv"
@@ -857,6 +840,8 @@ def _image_flow(
             return {
                 "status": "pending_confirmation",
                 "phase": "image_prepare",
+                "location": location,
+                "source_jsons": [str(p) for p in source_jsons],
                 "prepare_report": str(prepare_report_path),
                 "pending_mapping_json": str(pending_json),
                 "pending_mapping_csv": str(pending_csv),
@@ -871,6 +856,8 @@ def _image_flow(
         return {
             "status": "prepared",
             "phase": "image_prepare",
+            "location": location,
+            "source_jsons": [str(p) for p in source_jsons],
             "prepare_report": str(prepare_report_path),
             "reused_confirmed_mapping": reusable,
             "reason": "已生成图片/文档厂家对照，等待确认后再回写",
@@ -889,6 +876,8 @@ def _image_flow(
         return {
             "status": "pending_confirmation",
             "phase": "image_apply",
+            "location": location,
+            "source_jsons": [str(p) for p in source_jsons],
             "apply_report": str(apply_report_path),
             "reason": str(apply_report.get("blocked_reason") or "图片/文档回写被阻断"),
         }
@@ -899,6 +888,8 @@ def _image_flow(
     return {
         "status": "ok",
         "phase": "image_apply",
+        "location": location,
+        "source_jsons": [str(p) for p in source_jsons],
         "apply_report": str(apply_report_path),
         "reused_confirmed_mapping": reusable,
         "apply_summary": apply_summary,

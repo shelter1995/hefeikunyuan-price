@@ -28,6 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confirm-write", action="store_true", help="明确允许写入项目Excel")
     p.add_argument("--refresh-web-artifacts", action="store_true", help="confirm-write时强制重跑网价抓取与对照生成")
     p.add_argument("--refresh-image-artifacts", action="store_true", help="confirm-write时强制重跑OCR与图片文档对照生成")
+    p.add_argument("--manifest", help="dry-run生成的manifest路径；单文件建议使用，批量后续拆分支持")
     p.add_argument("--report-out", help="总结报告路径")
     return p
 
@@ -75,6 +76,8 @@ def main() -> int:
             sys.argv.append("--refresh-web-artifacts")
         if args.refresh_image_artifacts:
             sys.argv.append("--refresh-image-artifacts")
+        if args.manifest:
+            sys.argv.extend(["--manifest", args.manifest])
         if args.image_source_map:
             sys.argv.extend(["--image-source-map", args.image_source_map])
         if args.report_out:
