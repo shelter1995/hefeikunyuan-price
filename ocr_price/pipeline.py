@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -32,6 +31,12 @@ from .writeback_image_doc import (
 )
 from .reporting import render_single_report_markdown
 from .audit import audit_image_doc_updates
+from .events import append_event
+from .manifest import (
+    add_artifact_hashes as _add_manifest_artifact_hashes,
+    file_sha256 as _file_sha256,
+    validate_manifest_for_confirm as _validate_manifest_for_confirm,
+)
 from .xlsx_utils import load_workbook_safe
 
 SKIP_SHEETS = {"报价表"}
@@ -68,12 +73,10 @@ def _json_write(path: Path, payload: Any) -> None:
     )
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _write_events_jsonl(path: Path, events: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(event, ensure_ascii=False, default=str) for event in events]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def _assert_dry_run_unchanged(project: Path, before_hash: str) -> None:
@@ -116,6 +119,7 @@ def _write_manifest(path: Path, result: dict[str, Any], artifact_dir: Path) -> N
         web["location"] = web_location
     if image_doc is not None and image_location and not image_doc.get("location"):
         image_doc["location"] = image_location
+    _add_manifest_artifact_hashes(web, image_doc)
     manifest = {
         "project": result.get("project"),
         "artifact_dir": str(artifact_dir),
@@ -987,8 +991,24 @@ def run_single(
         "mode": mode,
         "started_at": datetime.now().isoformat(timespec="seconds"),
     }
+    append_event(
+        result,
+        stage="pipeline",
+        level="info",
+        message="开始执行报价更新流程",
+        data={"mode": mode, "dry_run": dry_run, "confirm_write": confirm_write},
+    )
 
     manifest = _read_manifest(manifest_path) if manifest_path else None
+    if confirm_write and manifest is not None:
+        _validate_manifest_for_confirm(project, manifest, expected_mode=mode)
+        append_event(
+            result,
+            stage="manifest",
+            level="info",
+            message="manifest校验通过",
+            data={"manifest": str(manifest_path)},
+        )
     web_pending = False
     if mode in {"web", "both"}:
         if confirm_write and manifest is not None and not refresh_web_artifacts:
@@ -1049,6 +1069,7 @@ def run_single(
     if result.get("web", {}).get("status") == "pending_confirmation" or result.get("image_doc", {}).get("status") == "pending_confirmation":
         result["status"] = "pending_confirmation"
         result["ended_at"] = datetime.now().isoformat(timespec="seconds")
+        append_event(result, stage="pipeline", level="blocked", message="存在待确认项，流程已阻断")
         if dry_run and project_before_hash is not None:
             _assert_dry_run_unchanged(project, project_before_hash)
             result["project_excel_hash_before"] = project_before_hash
@@ -1057,6 +1078,7 @@ def run_single(
 
     result["status"] = "ok"
     result["ended_at"] = datetime.now().isoformat(timespec="seconds")
+    append_event(result, stage="pipeline", level="info", message="报价更新流程完成")
     if dry_run and project_before_hash is not None:
         _assert_dry_run_unchanged(project, project_before_hash)
         result["project_excel_hash_before"] = project_before_hash
@@ -1188,11 +1210,14 @@ def main() -> int:
                 else project_artifact_dir / f"完整更新报告_single_{project_path.stem}_{_ts()}.json"
             )
             _json_write(report_out, result)
+            events_out = report_out.with_suffix(".events.jsonl")
+            _write_events_jsonl(events_out, result.get("events", []) or [])
             markdown_report = render_single_report_markdown(result, json_report_path=str(report_out))
             markdown_out = report_out.with_suffix(".md")
             markdown_out.write_text(markdown_report, encoding="utf-8")
             print(f"Status: {result['status']}")
             print(f"Report: {report_out}")
+            print(f"Events: {events_out}")
             print(f"MarkdownReport: {markdown_out}")
             _print_result_details(result)
         return 0
@@ -1267,9 +1292,16 @@ def main() -> int:
     summary["ended_at"] = datetime.now().isoformat(timespec="seconds")
     report_out = Path(args.report_out) if args.report_out else artifact_base_dir / f"完整更新报告_batch_{_ts()}.json"
     _json_write(report_out, summary)
+    events: list[dict[str, Any]] = []
+    for row in summary.get("results", []) or []:
+        if isinstance(row, dict):
+            events.extend(row.get("events", []) or [])
+    events_out = report_out.with_suffix(".events.jsonl")
+    _write_events_jsonl(events_out, events)
     print(f"Projects: {len(summary['results'])}")
     print(f"OK: {ok}, Pending: {pending}, Failed: {failed}")
     print(f"Report: {report_out}")
+    print(f"Events: {events_out}")
     return 0
 
 

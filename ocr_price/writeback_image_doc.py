@@ -14,6 +14,17 @@ from openpyxl.styles import Font
 
 from .inventory import apply_inventory_to_project, load_inventory_from_sources
 from .offline_validation import validate_offline_payload
+from .rules import (
+    CONFIRMED_SKIP_STATUS,
+    CONFIRMED_WRITE_STATUS,
+    PriceDeviationConfig,
+    check_price_deviation as _check_price_deviation,
+    coerce_price as _coerce_price,
+)
+from .semantic_adjustment import (
+    SemanticAdjustmentError,
+    interpret_supplement_adjustment_with_llm,
+)
 from .xlsx_utils import load_workbook_safe
 
 
@@ -45,8 +56,6 @@ def _read_source_text(input_file: str, ocr_json: dict[str, Any] | None = None) -
 
 SKIP_SHEETS = {"报价表"}
 MAPPING_HEADERS = ["项目文件Sheet", "最新清单厂家Sheet", "状态", "说明"]
-CONFIRMED_WRITE_STATUS = "已确认匹配"
-CONFIRMED_SKIP_STATUS = "已确认不更新"
 MANUFACTURER_STOPWORDS = (
     "安徽",
     "江苏",
@@ -79,49 +88,6 @@ class SourcePrice:
     is_electronic_negotiation: bool = False  # True if price is "电议" (electronic negotiation)
 
 
-@dataclass(frozen=True)
-class PriceDeviationConfig:
-    abs_tolerance: int = 1000
-    pct_tolerance: float = 0.20
-
-
-def _coerce_price(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    text = str(value).replace(",", "").strip()
-    match = re.search(r"(?<!\d)(\d{3,5})(?!\d)", text)
-    return int(match.group(1)) if match else None
-
-
-def _check_price_deviation(
-    offline_price: int | None,
-    web_price: Any,
-    label: str,
-    config: PriceDeviationConfig,
-) -> str | None:
-    if offline_price is None:
-        return None
-    reference = _coerce_price(web_price)
-    if reference is None or reference <= 0:
-        return None
-
-    diff = offline_price - reference
-    abs_diff = abs(diff)
-    pct_diff = abs_diff / reference
-    if abs_diff > config.abs_tolerance or pct_diff > config.pct_tolerance:
-        return (
-            f"{label}线下价与网价偏差过大："
-            f"线下={offline_price}，网价={reference}，"
-            f"差值={diff}，偏离={pct_diff:.2%}，"
-            f"阈值={config.abs_tolerance}元/{config.pct_tolerance:.0%}"
-        )
-    return None
-
-
 def _extract_company_from_filename(filename: str) -> str:
     """
     Extract manufacturer from file name, e.g.:
@@ -139,6 +105,8 @@ def _extract_company_from_filename(filename: str) -> str:
 
 def _normalize_company(name: str) -> str:
     value = re.sub(r"\s+", "", name or "")
+    # 常见输入/文件名错别字：报价图片常写“徐刚”，项目 sheet 通常是“徐钢”。
+    value = value.replace("刚", "钢")
     for token in MANUFACTURER_STOPWORDS:
         value = value.replace(token, "")
     return value
@@ -277,7 +245,7 @@ def _load_single_source_price(path: Path, location: str) -> SourcePrice | None:
     # If this is a supplement text with adjustment info, try to compute final price
     computed = None
     if rebar_price is None and coil_price is None:
-        computed = _compute_prices_from_supplement(data, location)
+        computed = _compute_prices_from_supplement(data, location, cache_path=path)
         if computed:
             rebar_price = computed.get("rebar_price")
             coil_price = computed.get("coil_price")
@@ -385,7 +353,38 @@ def load_source_prices(source_json_paths: list[Path], location: str) -> list[Sou
     return output
 
 
-def _compute_prices_from_supplement(data: dict[str, Any], location: str) -> dict[str, Any] | None:
+def _semantic_cache_key(location: str) -> str:
+    return _norm_location(location) or location
+
+
+def _semantic_result_from_cache(data: dict[str, Any], location: str) -> dict[str, Any] | None:
+    cache = data.get("_semantic_adjustments")
+    if not isinstance(cache, dict):
+        return None
+    cached = cache.get(_semantic_cache_key(location)) or cache.get(location)
+    return cached if isinstance(cached, dict) else None
+
+
+def _write_semantic_result_cache(
+    cache_path: Path | None,
+    data: dict[str, Any],
+    location: str,
+    result: dict[str, Any],
+) -> None:
+    if cache_path is None:
+        return
+    data.setdefault("_semantic_adjustments", {})[_semantic_cache_key(location)] = result
+    try:
+        cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _compute_prices_from_supplement(
+    data: dict[str, Any],
+    location: str,
+    cache_path: Path | None = None,
+) -> dict[str, Any] | None:
     """
     Try to compute prices from supplement text that contains adjustments like:
     '蚌埠下30', '阜阳下30', '合肥电议', etc.
@@ -403,6 +402,23 @@ def _compute_prices_from_supplement(data: dict[str, Any], location: str) -> dict
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-8", errors="ignore")
+    cached = _semantic_result_from_cache(data, location)
+    if cached:
+        return cached
+
+    company = _extract_company_from_filename(input_file)
+    try:
+        semantic = interpret_supplement_adjustment_with_llm(
+            text=text,
+            location=location,
+            company=company,
+        )
+    except SemanticAdjustmentError:
+        semantic = None
+    if semantic:
+        _write_semantic_result_cache(cache_path, data, location, semantic)
+        return semantic
+
     return _parse_adjustment_text(text, location)
 
 

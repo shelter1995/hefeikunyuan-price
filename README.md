@@ -38,6 +38,34 @@ playwright install chromium
 
 ## 4. 常用命令
 
+### 小白用户最简单用法
+
+在支持读取本项目 `AGENTS.md` / `skills/quote-update/SKILL.md` 的 Agent 对话框里，用户只需要输入一句话：
+
+```text
+更新景明苑报价
+```
+
+Agent 应自动完成：
+
+1. 在 `项目报价/` 中查找包含“景明苑”的实际 Excel 文件名。
+2. 默认执行 `mode=both` 的 dry-run。
+3. 报告 Manifest、Report、MarkdownReport、Events、待确认项和异常项。
+4. 等用户明确说“确认写入”后，再用同一次 Manifest 执行 confirm-write。
+
+用户确认厂家映射后，Agent 不得重新 dry-run。正确做法是用 `skills/quote-update/scripts/apply_confirmations.py` 更新待确认对照表；pending 为 0 后直接复用同一次 Manifest 执行 confirm-write。图片/文档映射也要完整确认，例如“徐刚”来源文件应匹配“徐钢”sheet。
+
+其他一句话：
+
+```text
+只更新景明苑网价
+只更新景明苑线下报价
+批量更新报价
+确认写入景明苑报价
+```
+
+如果匹配到多个项目文件，Agent 会列出候选项让用户选择；用户不需要自己拼命令。
+
 ### 单文件（默认全流程）
 ```powershell
 python skills/quote-update/scripts/run_single.py `
@@ -96,6 +124,57 @@ python skills/quote-update/scripts/run_single.py `
 `--confirm-write` 默认直接复用最近一次 dry-run 产物做 apply 写入（不重复抓网价、不重复跑OCR）。如确需重生产物，可追加：
 - `--refresh-web-artifacts`
 - `--refresh-image-artifacts`
+
+### 可信运行保护（2026-05-23）
+
+系统现在会在 dry-run 生成的 `dry_run_manifest.json` 中记录：
+
+- 项目 Excel 路径与 dry-run 后的 SHA256
+- 网价清单文件 SHA256
+- OCR JSON 源文件 SHA256
+- 执行模式、地点与产物目录
+
+`--confirm-write --manifest <path>` 会先校验这些信息。只要项目 Excel、网价清单或 OCR JSON 在 dry-run 后发生变化，系统会阻断写入并要求重新 dry-run。每次运行还会生成同名 `.events.jsonl` 结构化事件文件，便于排查“在哪个阶段阻断、跳过或失败”。
+
+推荐固定执行顺序：
+
+```powershell
+python skills/quote-update/scripts/run_single.py `
+  --project "项目报价/<项目Excel路径>" `
+  --mode both `
+  --dry-run `
+  --headless
+
+python skills/quote-update/scripts/run_single.py `
+  --project "项目报价/<项目Excel路径>" `
+  --mode both `
+  --confirm-write `
+  --headless `
+  --manifest "运行产物/<项目名>/dry_run_manifest.json"
+```
+
+如果确认写入阶段提示 `项目Excel已变化` 或 `manifest源文件已变化`，不要手工绕过；重新执行 dry-run，确认报告无异常后再写入。
+
+### 给其他 Agent 生成指令
+
+如果在别的 Agent 中执行，不需要手工复制长模板。先在本项目运行：
+
+```powershell
+python skills/quote-update/scripts/make_agent_prompt.py single-dry-run `
+  --project "项目报价/<实际文件名>.xlsx" `
+  --mode both
+```
+
+把输出内容完整复制给其他 Agent。dry-run 没有异常后，再生成确认写入指令：
+
+```powershell
+python skills/quote-update/scripts/make_agent_prompt.py single-confirm `
+  --project "项目报价/<实际文件名>.xlsx" `
+  --mode both `
+  --manifest "运行产物/<项目名>/dry_run_manifest.json"
+```
+
+批量场景使用 `batch-dry-run` / `batch-confirm`。
 
 线下报价价格校验以项目文件中同厂家 sheet 的网价为动态参考：H3(盘螺) 对比 G3，H4(螺纹) 对比 G4。任一价格与网价的差值超过 1000 元/吨或偏离比例超过 20% 时，不自动回写，报告为“线下价与网价偏差过大”，需要人工确认。若 G3/G4 没有可用网价，允许回写，但报告备注“无网价参考”。
 
@@ -516,6 +595,6 @@ python skills/quote-update/scripts/run_single.py `
 ## 6. 常见问题
 
 - 登录失败：先检查 `网站账号密码.txt` 与站点登录态/风控。
-- MiniMax API异常：检查 `.env` 中的 `MINIMAX_API_KEY` 是否配置正确。
+- MiniMax API异常：检查 `.env` 中的 `MINIMAX_API_KEY` 是否配置正确。图片/PDF 识别和补充报价语义理解都复用该 Key；补充报价会优先调用 MiniMax 文本模型，并把结构化结果缓存到补充 JSON 的 `_semantic_adjustments`，供 confirm-write 复用。
 - 若报告里有 `pending_confirmation`：先确认待确认对照，再重跑同一命令。
 - 若想强制重新匹配：删除 `运行产物/*/厂家对照表_*_正式.json` 和 `运行产物/*/*已确认.json`，再执行更新。

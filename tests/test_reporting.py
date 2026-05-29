@@ -104,3 +104,49 @@ def test_render_single_report_markdown_lists_inventory_details():
     assert "| 贵航 | 圆钢 16 | 告警 | R18 |" in markdown
     assert "蓝色（充足）" not in markdown
     assert "新标注颜色：" not in markdown
+
+
+def test_render_single_report_markdown_shows_pending_and_inventory_error():
+    result = {
+        "project": "项目报价/测试项目.xlsx",
+        "mode": "both",
+        "started_at": "2026-05-23T09:00:00",
+        "ended_at": "2026-05-23T09:01:00",
+        "status": "pending_confirmation",
+        "web": {
+            "status": "pending_confirmation",
+            "reason": "网价对照存在待确认项",
+            "pending_mapping_json": "运行产物/厂家对照表_安徽合肥_待确认.json",
+            "pending_details": {
+                "pending_matches": [
+                    {
+                        "项目文件Sheet": "徐钢",
+                        "最新清单厂家Sheet": "徐钢",
+                        "状态": "待确认匹配",
+                        "说明": "需人工确认",
+                    }
+                ],
+                "pending_new": [],
+            },
+        },
+        "image_doc": {
+            "status": "ok",
+            "apply_summary": {
+                "updated_items": [],
+                "skipped_items": [],
+            },
+            "inventory_report": {
+                "status": "error",
+                "error": "报价表sheet不存在",
+            },
+        },
+    }
+
+    markdown = render_single_report_markdown(result, json_report_path="运行产物/report.json")
+
+    assert "待确认事项" in markdown
+    assert "网价对照存在待确认项" in markdown
+    assert "厂家对照表_安徽合肥_待确认.json" in markdown
+    assert "徐钢" in markdown
+    assert "库存颜色标注异常" in markdown
+    assert "报价表sheet不存在" in markdown

@@ -83,6 +83,42 @@ def _section(title: str, prefix: str, summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _pending_lines(flow_name: str, flow: dict[str, Any]) -> list[str]:
+    if flow.get("status") != "pending_confirmation":
+        return []
+    lines = [f"### {flow_name}待确认事项", ""]
+    reason = str(flow.get("reason") or "").strip()
+    if reason:
+        lines.append(f"**阻断原因**：{reason}")
+        lines.append("")
+    mapping = str(flow.get("pending_mapping_json") or "").strip()
+    if mapping:
+        lines.append(f"**待确认对照表**：`{mapping}`")
+        lines.append("")
+
+    details = flow.get("pending_details") if isinstance(flow.get("pending_details"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    rows.extend(details.get("pending_matches") or [])
+    rows.extend(details.get("pending_new") or [])
+    if rows:
+        lines.extend(
+            [
+                "| 序号 | 项目Sheet | 来源Sheet | 状态 | 说明 |",
+                "|------|----------|----------|------|------|",
+            ]
+        )
+        for idx, row in enumerate(rows, 1):
+            lines.append(
+                f"| {idx} | {row.get('项目文件Sheet', '')} | "
+                f"{row.get('最新清单厂家Sheet', '')} | {row.get('状态', '')} | "
+                f"{row.get('说明', '')} |"
+            )
+    else:
+        lines.append("- 无可展示明细，请查看 JSON 报告。")
+    lines.append("")
+    return lines
+
+
 def render_single_report_markdown(result: dict[str, Any], json_report_path: str) -> str:
     project_name = Path(str(result.get("project") or "")).name
     started = str(result.get("started_at") or "")
@@ -101,13 +137,26 @@ def render_single_report_markdown(result: dict[str, Any], json_report_path: str)
         "",
     ]
 
+    if status == "ok":
+        lines.extend(
+            [
+                "### 复用确认记录说明",
+                "本次未发现新厂家或待确认项；已确认对照关系按历史记录复用。",
+                "",
+            ]
+        )
+
     web = result.get("web")
     if isinstance(web, dict) and web.get("status") == "ok":
         lines.extend(_section("1. 网价更新（G1/G3/G4）", "G", web.get("apply_summary") or {}))
+    elif isinstance(web, dict):
+        lines.extend(_pending_lines("网价", web))
 
     image_doc = result.get("image_doc")
     if isinstance(image_doc, dict) and image_doc.get("status") == "ok":
         lines.extend(_section("2. 图片/文档价更新（H1/H3/H4）", "H", image_doc.get("apply_summary") or {}))
+    elif isinstance(image_doc, dict):
+        lines.extend(_pending_lines("图片/文档", image_doc))
 
     # Inventory color report
     inventory_report = image_doc.get("inventory_report") if isinstance(image_doc, dict) else None
@@ -123,6 +172,12 @@ def render_single_report_markdown(result: dict[str, Any], json_report_path: str)
                 lines.append(f"| {row['mill']} | {row['spec']} | {row['status']} | {row['cell']} |")
         else:
             lines.append("| 无 | 无 | 无 | 无 |")
+        lines.append("")
+    elif isinstance(inventory_report, dict) and inventory_report.get("status") not in {None, "skipped"}:
+        lines.append("")
+        lines.append("### 3. 库存颜色标注异常")
+        lines.append("")
+        lines.append(str(inventory_report.get("error") or inventory_report.get("reason") or "未知错误"))
         lines.append("")
 
     lines.extend(

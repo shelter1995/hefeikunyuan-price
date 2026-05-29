@@ -1218,7 +1218,7 @@ def apply_web_writeback(
                 "sheet": sheet,
                 "mill": source_company,
                 "note": partial_note,
-                "G1_old": old_g1,
+                "G1_old": str(old_g1) if old_g1 is not None else None,
                 "G1_new": ws["G1"].value,
                 "G3_old": old_g3,
                 "G3_coil": coil if coil is not None else f"{old_g3} (保留原值)",

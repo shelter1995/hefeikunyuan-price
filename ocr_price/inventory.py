@@ -208,6 +208,10 @@ def load_inventory_from_sources(
         file_company = _extract_company_from_filename(input_file or path.name)
         if not _company_match(file_company, company_name):
             continue
+        structured_items = _inventory_items_from_vision_result(data)
+        if structured_items:
+            items.extend(structured_items)
+            continue
         # Try to read raw text from original file (pass OCR JSON for image files)
         text = _read_source_text(input_file or str(path), ocr_json=data)
         if text:
@@ -299,6 +303,70 @@ def _read_source_text(input_file: str, ocr_json: dict[str, Any] | None = None) -
     return None
 
 
+def _inventory_items_from_vision_result(data: dict[str, Any]) -> list[InventoryItem]:
+    vision_result = data.get("_vision_result")
+    if not isinstance(vision_result, dict):
+        return []
+    inventory = vision_result.get("库存情况")
+    if not isinstance(inventory, list):
+        return []
+
+    items: list[InventoryItem] = []
+    for raw_item in inventory:
+        if not isinstance(raw_item, dict):
+            continue
+        parsed = _parse_structured_inventory_item(raw_item)
+        if parsed:
+            items.append(parsed)
+    return items
+
+
+def _parse_structured_inventory_item(item: dict[str, Any]) -> InventoryItem | None:
+    spec_text = str(item.get("规格") or "").strip()
+    if not spec_text:
+        return None
+
+    status = str(item.get("状态") or "").strip()
+    note = str(item.get("原始描述") or "").strip()
+    if status not in {"充足", "告警", "缺货"}:
+        status, detected_note = _detect_status(note or spec_text)
+        note = note or detected_note
+
+    length = None
+    m_len = re.search(r"(\d+)米", spec_text)
+    if m_len:
+        length = m_len.group(1)
+
+    product = "螺纹"
+    for candidate in ("盘螺", "线材", "高线", "圆钢", "螺纹"):
+        if candidate in spec_text:
+            product = candidate
+            break
+    if product == "高线":
+        product = "线材"
+
+    tail = spec_text
+    if product in spec_text:
+        tail = spec_text.split(product, 1)[1]
+    m_spec = re.search(r"(\d+)[eE]?", tail)
+    if not m_spec:
+        numbers = re.findall(r"\d+", spec_text)
+        if not numbers:
+            return None
+        spec = numbers[-1]
+    else:
+        spec = m_spec.group(1)
+
+    return InventoryItem(
+        product=product,
+        spec=spec,
+        length=length,
+        material=None,
+        status=status,
+        note=note,
+    )
+
+
 def _norm_text(s: str) -> str:
     return re.sub(r"\s+", "", s).upper()
 
@@ -336,6 +404,8 @@ def _match_spec(item_spec: str, row_spec: str) -> bool:
 
 def _detect_product_type(row: int, ws: Any) -> str:
     """Detect product type from A column (等级)."""
+    length = ws.cell(row=row, column=3).value
+    spec = ws.cell(row=row, column=2).value
     val = ws.cell(row=row, column=1).value
     if val:
         text = str(val).upper()
@@ -347,6 +417,8 @@ def _detect_product_type(row: int, ws: Any) -> str:
         mat_text = str(mat).upper()
         if "HPB" in mat_text:
             return "线材"
+        if "HRB" in mat_text and not length and str(spec or "").strip() in {"6", "8", "10", "12"}:
+            return "盘螺"
     # Default based on row context: rows 9-11 are 一级钢 (line), 12+ are 抗震三级钢 (rebar)
     if row <= 11:
         return "线材"
@@ -401,10 +473,7 @@ def apply_inventory_to_project(
         material = ws.cell(row=r, column=4).value
         if spec is None:
             continue
-        product = "线材" if r <= 11 else "螺纹"
-        # Check if D column has HPB -> line
-        if material and "HPB" in str(material).upper():
-            product = "线材"
+        product = _detect_product_type(r, ws)
         row_map.append({
             "row": r,
             "spec": str(spec).strip(),

@@ -56,3 +56,40 @@ def test_apply_web_confirmations_maps_liugang_and_skips_new_mills(tmp_path: Path
 
     summary = json.loads(result.stdout)
     assert summary["pending_count"] == 0
+
+
+def test_apply_confirmations_supports_image_doc_mapping(tmp_path: Path):
+    mapping = tmp_path / "图片文档厂家对照表_安徽蚌埠_待确认.json"
+    mapping.write_text(
+        json.dumps(
+            [
+                {"项目文件Sheet": "徐钢", "最新清单厂家Sheet": "徐刚", "状态": "待确认匹配", "说明": ""},
+                {"项目文件Sheet": "闽源", "最新清单厂家Sheet": "闽源", "状态": "待确认匹配", "说明": ""},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_script_path()),
+            "--image-mapping-json",
+            str(mapping),
+            "--image-match",
+            "徐钢=徐刚",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 0
+    rows = json.loads(mapping.read_text(encoding="utf-8"))
+    assert rows[0]["状态"] == "已确认匹配"
+    assert rows[0]["最新清单厂家Sheet"] == "徐刚"
+    assert rows[1]["状态"] == "已确认匹配"
+
+    summary = json.loads(result.stdout)
+    assert summary["image"]["pending_count"] == 0

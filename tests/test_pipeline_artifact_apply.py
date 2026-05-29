@@ -143,21 +143,33 @@ def test_web_apply_from_artifacts_blocks_when_mapping_pending(tmp_path: Path):
 
 
 def test_run_single_confirm_write_uses_manifest_paths(monkeypatch, tmp_path: Path):
+    project = tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx"
+    artifact_dir = tmp_path / "artifacts"
+    raw = artifact_dir / "安徽合肥2026-05-13建筑钢材原料价格清单.xlsx"
+    source = artifact_dir / "ocr价格提取_桂鑫报价.json"
+    artifact_dir.mkdir()
+    project.write_bytes(b"project")
+    raw.write_bytes(b"raw")
+    source.write_text("{}", encoding="utf-8")
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
             {
-                "project": str(tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx"),
-                "artifact_dir": str(tmp_path / "artifacts"),
+                "project": str(project),
+                "mode": "both",
+                "artifact_dir": str(artifact_dir),
+                "project_excel_hash_after": pipeline._file_sha256(project),
                 "web": {
                     "location": "安徽合肥",
-                    "mapping_json": str(tmp_path / "artifacts" / "厂家对照表_安徽合肥_已确认.json"),
-                    "raw_price_excel": str(tmp_path / "artifacts" / "安徽合肥2026-05-13建筑钢材原料价格清单.xlsx"),
+                    "mapping_json": str(artifact_dir / "厂家对照表_安徽合肥_已确认.json"),
+                    "raw_price_excel": str(raw),
+                    "raw_price_excel_sha256": pipeline._file_sha256(raw),
                 },
                 "image_doc": {
                     "location": "安徽蚌埠",
-                    "mapping_json": str(tmp_path / "artifacts" / "图片文档厂家对照表_安徽蚌埠_已确认.json"),
-                    "source_jsons": [str(tmp_path / "artifacts" / "ocr价格提取_桂鑫报价.json")],
+                    "mapping_json": str(artifact_dir / "图片文档厂家对照表_安徽蚌埠_已确认.json"),
+                    "source_jsons": [str(source)],
+                    "source_json_sha256": {str(source): pipeline._file_sha256(source)},
                 },
             },
             ensure_ascii=False,
@@ -178,7 +190,7 @@ def test_run_single_confirm_write_uses_manifest_paths(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(pipeline, "_image_apply_from_manifest", fake_image_apply_from_manifest)
 
     result = pipeline.run_single(
-        project=tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx",
+        project=project,
         mode="both",
         list_url=None,
         detail_url=None,
@@ -188,7 +200,7 @@ def test_run_single_confirm_write_uses_manifest_paths(monkeypatch, tmp_path: Pat
         headless=True,
         image_inputs=[],
         image_jsons=[],
-        artifact_dir=tmp_path / "artifacts",
+        artifact_dir=artifact_dir,
         dry_run=False,
         confirm_write=True,
         manifest_path=manifest,

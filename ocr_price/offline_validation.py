@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
-HARD_PRICE_MIN = 1000
-HARD_PRICE_MAX = 10000
-VALID_INVENTORY_STATUSES = frozenset({"充足", "告警", "缺货"})
+import re
+
+from .rules import HARD_PRICE_MAX, HARD_PRICE_MIN, VALID_INVENTORY_STATUSES
 
 
 @dataclass

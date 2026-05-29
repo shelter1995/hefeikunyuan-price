@@ -92,6 +92,34 @@ d:\GitHub_WorkSpace\hefeikunyuan
 
 ## 4. 构建与运行命令
 
+### 4.0 小白用户一句话入口
+
+本项目面向的小白用户不需要提供命令行参数，也不需要复制长模板。只要用户在 agent 对话框里说一句自然语言，Agent 必须自己完成文件匹配、模式判断、dry-run 执行和结果汇报。
+
+常见一句话示例：
+
+| 用户说法 | Agent 应理解为 |
+|----------|----------------|
+| `更新报价` | 如果 `项目报价/` 下只有一个 `.xlsx`，对该文件执行 `mode=both` 的 dry-run；如果有多个文件，列出文件让用户选择 |
+| `更新景明苑报价` | 在 `项目报价/` 中按关键词 `景明苑` 查找实际文件名，唯一匹配时执行单文件 `mode=both` dry-run |
+| `只更新景明苑网价` | 查找 `景明苑` 项目文件，执行单文件 `mode=web` dry-run |
+| `只更新景明苑线下报价` | 查找 `景明苑` 项目文件，执行单文件 `mode=image_doc` dry-run |
+| `批量更新报价` | 对 `项目报价/*.xlsx` 执行批量 `mode=both` dry-run |
+| `确认写入景明苑报价` | 仅在已经有同一次 dry-run 的 Manifest 且报告无待确认/异常时，使用该 Manifest 执行 confirm-write |
+
+一句话入口的强制流程：
+
+1. 先读取 `项目报价/` 实际文件名，禁止让用户自己拼路径。
+2. 根据用户话术识别模式：默认 `both`；出现“只更新网价”用 `web`；出现“只更新线下/图片/文档”用 `image_doc`；出现“批量”用 batch。
+3. 如果匹配到 0 个项目文件，说明未找到并列出可选文件；如果匹配到多个项目文件，只展示候选项并让用户选择，禁止猜测。
+4. 默认先 dry-run，报告 Manifest、Report、MarkdownReport、Events、待确认项和异常项。
+5. dry-run 通过后，必须等待用户明确说“确认写入/可以写入/执行写入”，才能用同一次 Manifest 执行 confirm-write。
+6. 禁止要求用户自己拼命令，除非用户明确要求查看命令。
+7. 用户确认厂家映射后，必须用 `skills/quote-update/scripts/apply_confirmations.py` 更新网价和图片/文档待确认表；pending 为 0 后直接复用同一次 Manifest 执行 confirm-write。确认映射后禁止重新 dry-run，避免重复登录和重复抓网价。
+8. 图片/文档厂家也必须完整列入确认清单；例如来源文件为“徐刚”、项目 sheet 为“徐钢”时，应作为同一厂家进入待确认匹配，确认后才能写入 H1/H3/H4 和库存颜色。
+
+换句话说，小白用户只需要说：`更新景明苑报价`。Agent 负责执行安全流程：先 dry-run，报告 Manifest，等待用户确认，再 confirm-write。
+
 ### 4.1 环境准备
 
 在项目根目录执行：
@@ -201,9 +229,9 @@ pytest tests/
 - 大量使用 `monkeypatch` Mock 外部依赖（MiniMax API、Playwright、文件系统）。
 - 测试风格混合**纯单元测试**（数学计算、字符串解析）和**集成测试**（openpyxl 完整读写回环）。
 
-### 5.4 根级测试脚本（非 pytest）
+### 5.4 归档的一次性调试脚本（非 pytest）
 
-根目录下有多个 `test_*.py`（如 `test_login.py`、`test_minimax_vision.py`），这些是**一次性手工调试脚本**，不是正式测试用例。修改核心代码后无需保证它们通过，但可作为 API 调用参考。
+历史根级 `test_*.py`、`reprocess_images*.py`、`retry_failed.py` 已归档到 `archive/one_off_scripts/`。这些是**一次性手工调试脚本**，不是正式测试用例。修改核心代码后无需保证它们通过；如需参考，先确认当前 `ocr_price/` API 是否已变化。
 
 ---
 
