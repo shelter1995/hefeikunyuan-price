@@ -25,3 +25,5 @@ progress.md
 **/*.backup_before_*.xlsx
 *.events.jsonl
 archive/one_off_scripts/*.py
+修复计划.md
+docs/
