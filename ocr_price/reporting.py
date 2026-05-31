@@ -19,15 +19,65 @@ def _inventory_rows(inventory_report: dict[str, Any]) -> list[dict[str, str]]:
     for item in inventory_report.get("applied", []) or []:
         if not isinstance(item, dict):
             continue
+        source_parts = [
+            str(item.get("source_spec") or "").strip(),
+            str(item.get("confidence_basis") or "").strip(),
+        ]
         rows.append(
             {
                 "mill": str(item.get("sheet_mill") or item.get("mill") or ""),
-                "spec": _inventory_spec_text(item),
+                "warehouse": str(item.get("warehouse") or ""),
+                "material": str(item.get("material") or ""),
+                "product": str(item.get("product") or ""),
+                "spec": str(item.get("spec") or ""),
+                "length": str(item.get("length") or ""),
                 "status": str(item.get("status") or ""),
                 "cell": str(item.get("cell") or ""),
+                "source_desc": "；".join(x for x in source_parts if x),
             }
         )
     return rows
+
+
+def _inventory_review_lines(inventory_report: dict[str, Any]) -> list[str]:
+    review = inventory_report.get("review")
+    if not isinstance(review, dict):
+        return []
+    lines = [
+        "",
+        "### 3. 库存归并检查",
+        "",
+        (
+            f"原始项：{review.get('raw_count', 0)}；"
+            f"最终采用项：{review.get('selected_count', 0)}；"
+            f"重复组：{review.get('duplicate_group_count', 0)}；"
+            f"冲突组：{review.get('conflict_group_count', 0)}"
+        ),
+        "",
+    ]
+    conflicts = review.get("conflict_groups") or []
+    if conflicts:
+        lines.extend(
+            [
+                "| 厂家 | 仓库 | 钢材型号和规格 | 冲突状态 | 最终采用 |",
+                "|------|------|----------------|----------|----------|",
+            ]
+        )
+        for group in conflicts:
+            if not isinstance(group, dict):
+                continue
+            selected = group.get("selected") if isinstance(group.get("selected"), dict) else {}
+            spec = _inventory_spec_text(group)
+            statuses = " / ".join(str(x) for x in group.get("statuses", []) if x)
+            lines.append(
+                f"| {group.get('company', '')} | {group.get('warehouse', '')} | "
+                f"{spec} | {statuses} | {selected.get('status', '')} |"
+            )
+        lines.append("")
+    else:
+        lines.append("- 未发现库存状态冲突。")
+        lines.append("")
+    return lines
 
 
 def _change(cell: dict[str, Any] | None) -> str:
@@ -160,22 +210,32 @@ def render_single_report_markdown(result: dict[str, Any], json_report_path: str)
 
     # Inventory color report
     inventory_report = image_doc.get("inventory_report") if isinstance(image_doc, dict) else None
+    has_inventory_review = isinstance(inventory_report, dict) and bool(inventory_report.get("review"))
+    if has_inventory_review:
+        lines.extend(_inventory_review_lines(inventory_report))
+
     if isinstance(inventory_report, dict) and inventory_report.get("status") == "ok":
         rows = _inventory_rows(inventory_report)
         lines.append("")
-        lines.append("### 3. 库存颜色标注明细")
+        color_section_no = "4" if has_inventory_review else "3"
+        lines.append(f"### {color_section_no}. 库存颜色标注明细")
         lines.append("")
-        lines.append("| 厂家 | 钢材型号和规格 | 库存情况 | 单元格 |")
-        lines.append("|------|----------------|----------|--------|")
+        lines.append("| 厂家 | 仓库 | 材质 | 产品 | 规格 | 长度 | 库存情况 | 单元格 | 来源描述 |")
+        lines.append("|------|------|------|------|------|------|----------|--------|----------|")
         if rows:
             for row in rows:
-                lines.append(f"| {row['mill']} | {row['spec']} | {row['status']} | {row['cell']} |")
+                lines.append(
+                    f"| {row['mill']} | {row['warehouse']} | {row['material']} | "
+                    f"{row['product']} | {row['spec']} | {row['length']} | "
+                    f"{row['status']} | {row['cell']} | {row['source_desc']} |"
+                )
         else:
-            lines.append("| 无 | 无 | 无 | 无 |")
+            lines.append("| 无 | 无 | 无 | 无 | 无 | 无 | 无 | 无 | 无 |")
         lines.append("")
-    elif isinstance(inventory_report, dict) and inventory_report.get("status") not in {None, "skipped"}:
+    elif isinstance(inventory_report, dict) and inventory_report.get("status") not in {None, "skipped", "review_only"}:
         lines.append("")
-        lines.append("### 3. 库存颜色标注异常")
+        color_section_no = "4" if has_inventory_review else "3"
+        lines.append(f"### {color_section_no}. 库存颜色标注异常")
         lines.append("")
         lines.append(str(inventory_report.get("error") or inventory_report.get("reason") or "未知错误"))
         lines.append("")

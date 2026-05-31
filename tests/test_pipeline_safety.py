@@ -17,6 +17,10 @@ def _make_project(path: Path) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "报价表"
+    ws.cell(row=1, column=5, value="闽源")
+    ws.cell(row=12, column=2, value="20")
+    ws.cell(row=12, column=3, value="9")
+    ws.cell(row=12, column=4, value="HRB400E")
     mill = wb.create_sheet("测试钢厂")
     mill["G3"] = 3300
     mill["G4"] = 3100
@@ -39,6 +43,12 @@ def test_apply_writeback_dry_run_does_not_modify_workbook(tmp_path: Path):
             "records": [
                 {"location": "蚌埠", "coil_price": 3400, "rebar_price": 3200},
             ],
+            "_vision_result": {
+                "库存情况": [
+                    {"规格": "9米螺纹12E", "状态": "充足", "原始描述": ""},
+                    {"规格": "9米螺纹12E", "状态": "告警", "原始描述": "极少"},
+                ]
+            },
         },
     )
     _write_json(
@@ -67,8 +77,78 @@ def test_apply_writeback_dry_run_does_not_modify_workbook(tmp_path: Path):
     assert result["dry_run"] is True
     assert result["updated_count"] == 1
     assert result["backup_file"] is None
+    assert result["inventory_report"]["status"] == "review_only"
+    assert result["inventory_report"]["review"]["conflict_group_count"] == 1
     assert ws["H3"].value == 3300
     assert ws["H4"].value == 3100
+    wb.close()
+
+
+def test_apply_writeback_inventory_uses_review_selected_item_once(tmp_path: Path):
+    project = tmp_path / "project.xlsx"
+    mapping = tmp_path / "mapping.json"
+    report = tmp_path / "report.json"
+    _make_project(project)
+
+    text = tmp_path / "闽源.txt"
+    text.write_text("9米HRB400E规格有：20（配货）", encoding="utf-8")
+    fresh = tmp_path / "ocr价格提取_闽源.json"
+    stale = tmp_path / "ocr价格提取_闽源_旧.json"
+    _write_json(
+        fresh,
+        {
+            "company": "闽源集团",
+            "meta": {"input_file": str(text)},
+            "quote_date": "2026-05-11",
+            "records": [
+                {"location": "蚌埠", "coil_price": 3400, "rebar_price": 3200},
+            ],
+        },
+    )
+    _write_json(
+        stale,
+        {
+            "company": "闽源集团",
+            "inventory": [
+                {"规格": "9米HRB400E螺纹20", "状态": "充足", "原始描述": "旧缓存"}
+            ],
+        },
+    )
+    _write_json(
+        mapping,
+        [
+            {
+                "项目文件Sheet": "测试钢厂",
+                "最新清单厂家Sheet": "闽源",
+                "状态": "已确认匹配",
+                "说明": "",
+            }
+        ],
+    )
+
+    result = apply_writeback(
+        project_excel=project,
+        source_json_paths=[fresh, stale],
+        mapping_json_path=mapping,
+        location="蚌埠",
+        report_out=report,
+        dry_run=False,
+    )
+
+    inventory_report = result["inventory_report"]
+    assert inventory_report["status"] == "ok"
+    assert inventory_report["applied_count"] == 1
+    applied = inventory_report["applied"][0]
+    assert applied["status"] == "告警"
+    assert applied["cell"] == "E12"
+    assert applied["source_spec"] == "9米HRB400E螺纹20"
+    assert applied["confidence_basis"] == "原始txt解析"
+    assert inventory_report["review"]["conflict_group_count"] == 1
+
+    wb = load_workbook(project)
+    ws = wb["报价表"]
+    assert ws["E12"].fill.fill_type == "solid"
+    assert ws["E12"].fill.start_color.rgb in {"00FFC000", "FFC000"}
     wb.close()
 
 

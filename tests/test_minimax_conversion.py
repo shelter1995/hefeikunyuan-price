@@ -1,4 +1,5 @@
 from ocr_price import minimax_vision
+from ocr_price.parser import parse_inventory_from_text
 
 
 def test_convert_to_ocr_format_respects_requested_city_and_keeps_inventory():
@@ -60,3 +61,43 @@ def test_analyze_quote_image_to_ocr_format_passes_target_cities(monkeypatch):
     assert captured["analyze_target_cities"] == ["蚌埠"]
     assert captured["convert_target_cities"] == ["蚌埠"]
     assert result["records"][0]["location"] == "蚌埠"
+
+
+def test_merge_vision_results_deduplicates_inventory_semantically_keep_first():
+    merged = minimax_vision._merge_vision_results(
+        [
+            {
+                "厂家名称": "马长江",
+                "蚌埠": {"螺纹": 3280, "盘螺": 3540},
+                "库存情况": [
+                    {"规格": "蚌埠螺纹9m 14E", "状态": "充足", "原始描述": ""},
+                    {"规格": "9米螺纹12E", "状态": "充足", "原始描述": ""},
+                ],
+            },
+            {
+                "厂家名称": "马长江",
+                "蚌埠": {"螺纹": 3280, "盘螺": 3540},
+                "库存情况": [
+                    {"规格": "9米螺纹14E (蚌埠)", "状态": "告警", "原始描述": "14E配"},
+                    {"规格": "9米螺纹12E", "状态": "告警", "原始描述": "极少"},
+                ],
+            },
+        ],
+        ["蚌埠"],
+    )
+
+    assert merged["库存情况"] == [
+        {"规格": "蚌埠螺纹9m 14E", "状态": "充足", "原始描述": ""},
+        {"规格": "9米螺纹12E", "状态": "充足", "原始描述": ""},
+    ]
+
+
+def test_parse_inventory_from_text_keeps_material_and_full_chinese_note():
+    inventory = parse_inventory_from_text("9米HRB400E规格有：12、20（配货）")
+
+    assert {
+        "规格": "9米HRB400E螺纹20",
+        "状态": "告警",
+        "原始描述": "配货",
+        "材质": "HRB400E",
+    } in inventory

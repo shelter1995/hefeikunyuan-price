@@ -348,6 +348,76 @@ def analyze_quote_image_with_retry(
     return merged
 
 
+WAREHOUSE_KEYWORDS = (
+    "蚌埠库", "蚌埠", "钢厂", "厂内", "场内", "阜阳库", "阜阳", "蒙城", "合肥港", "合肥铁四局", "南京库", "安庆库",
+)
+
+WAREHOUSE_KEY_MAP = {
+    "场内": "厂内",
+    "钢厂": "厂内",
+    "厂内": "厂内",
+    "蚌埠库": "蚌埠",
+    "蚌埠": "蚌埠",
+    "阜阳库": "阜阳",
+    "阜阳": "阜阳",
+}
+
+
+def _normalize_inventory_warehouse(raw: str) -> str:
+    for label, key in WAREHOUSE_KEY_MAP.items():
+        if label in raw:
+            return key
+    return raw
+
+
+def _extract_inventory_spec_number(text: str, product: str) -> str:
+    tail = text
+    if product in tail:
+        tail = tail.split(product, 1)[1]
+    tail = re.sub(r"\([^)]*\)|（[^）]*）", " ", tail)
+    tail = re.sub(r"(HRB|HPB)\d+E?", " ", tail, flags=re.IGNORECASE)
+    tail = re.sub(r"\d+\s*[米mM]", " ", tail)
+    m = re.search(r"(\d+)[eE]?", tail)
+    if m:
+        return m.group(1)
+
+    cleaned = re.sub(r"(HRB|HPB)\d+E?", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\d+\s*[米mM]", " ", cleaned)
+    numbers = re.findall(r"\d+", cleaned)
+    return numbers[-1] if numbers else ""
+
+
+def _parse_inventory_spec_key(spec_text: str) -> tuple[str, str, str, str]:
+    """Parse inventory spec text into semantic dedup key: (spec_num, length, product, warehouse)."""
+    text = spec_text.strip()
+
+    warehouse = ""
+    m = re.search(rf"\(([^)]*(?:{'|'.join(WAREHOUSE_KEYWORDS)})[^)]*)\)", text)
+    if m:
+        warehouse = _normalize_inventory_warehouse(m.group(1).strip())
+    else:
+        m = re.match(rf"({'|'.join(WAREHOUSE_KEYWORDS)})", text)
+        if m:
+            warehouse = _normalize_inventory_warehouse(m.group(1))
+
+    length = ""
+    m = re.search(r"(\d+)\s*[米mM]", text)
+    if m:
+        length = m.group(1)
+
+    product = "螺纹"
+    for p in ("盘螺", "线材", "高线", "圆钢"):
+        if p in text:
+            product = p
+            break
+    if product == "高线":
+        product = "线材"
+
+    spec_num = _extract_inventory_spec_number(text, product)
+
+    return (spec_num, length, product, warehouse)
+
+
 def _merge_vision_results(
     results: list[dict[str, Any]], target_cities: list[str]
 ) -> dict[str, Any]:
@@ -387,15 +457,21 @@ def _merge_vision_results(
                             merged[city_key] = {}
                         merged[city_key][field] = r[city_key][field]
 
-    # Merge inventory: collect all unique items
     all_inventory: list[dict[str, Any]] = []
-    seen_inventory = set()
+    seen_inventory: dict[tuple, int] = {}
     for r in results:
         for item in r.get("库存情况", []):
-            key = (item.get("规格", ""), item.get("原始描述", ""))
-            if key not in seen_inventory:
-                seen_inventory.add(key)
-                all_inventory.append(item)
+            spec_text = item.get("规格", "")
+            key = _parse_inventory_spec_key(spec_text)
+            if key[0] or key[2]:  # Has spec number or product type
+                if key not in seen_inventory:
+                    seen_inventory[key] = len(all_inventory)
+                    all_inventory.append(dict(item))
+            else:
+                raw_key = (spec_text, item.get("原始描述", ""))
+                if raw_key not in seen_inventory:
+                    seen_inventory[raw_key] = len(all_inventory)
+                    all_inventory.append(dict(item))
     merged["库存情况"] = all_inventory
 
     # Merge remarks: collect all unique

@@ -589,7 +589,7 @@ def parse_html_price_records(html_text: str, target_location: str | None = None)
 
 INVENTORY_STATUS_KEYWORDS = {
     "缺货": ("无货", "无", "缺货", "没货", "暂无", "等生产", "停产"),
-    "告警": ("极少", "少", "少量", "紧张", "配"),
+    "告警": ("配货", "配", "极少", "少", "少量", "紧张"),
 }
 
 
@@ -605,7 +605,7 @@ def _detect_inventory_status(spec_text: str) -> tuple[str, str]:
         if kw in text:
             return "告警", kw
     # Check for quantity note like (3件), (22件), (36件)
-    m = re.search(r"\((\d+件?)\)", text)
+    m = re.search(r"[（(](\d+件?)[）)]", text)
     if m:
         return "告警", m.group(1)
     # Check for numeric quantity without parentheses
@@ -625,7 +625,7 @@ def _extract_inventory_specs(specs_text: str) -> list[dict[str, str]]:
         if not part:
             continue
         # Match spec number with optional note: "12", "14（少）", "16(3件)", "22E配"
-        m = re.match(r"(\d+[eE]?)\s*(?:\(([^)]+)\))?", part)
+        m = re.match(r"(\d+[eE]?)\s*(?:[（(]([^）)]+)[）)])?", part)
         if m:
             spec = m.group(1)
             note = m.group(2) or ""
@@ -633,7 +633,7 @@ def _extract_inventory_specs(specs_text: str) -> list[dict[str, str]]:
             results.append({
                 "规格": spec,
                 "状态": status,
-                "原始描述": detected_note or note or part,
+                "原始描述": note or detected_note or part,
             })
     return results
 
@@ -657,6 +657,12 @@ def _parse_inventory_line(line: str) -> list[dict[str, str]]:
         if m_len:
             length = m_len.group(1)
 
+        # Extract material from prefix
+        material = None
+        m_mat = re.search(r"(HRB\d+E?|HPB\d+)", prefix)
+        if m_mat:
+            material = m_mat.group(1)
+
         # Extract product type from prefix
         product = "螺纹"
         for p in ("盘螺", "线材", "高线"):
@@ -668,14 +674,19 @@ def _parse_inventory_line(line: str) -> list[dict[str, str]]:
         spec_prefix = ""
         if length:
             spec_prefix += f"{length}米"
+        if material:
+            spec_prefix += material
         spec_prefix += product
 
         for spec_item in _extract_inventory_specs(specs_text):
-            items.append({
+            item = {
                 "规格": f"{spec_prefix}{spec_item['规格']}",
                 "状态": spec_item["状态"],
                 "原始描述": spec_item["原始描述"],
-            })
+            }
+            if material:
+                item["材质"] = material
+            items.append(item)
         return items
 
     # Pattern 2: "PRODUCT specs" (simple list)

@@ -12,7 +12,11 @@ from typing import Any
 
 from openpyxl.styles import Font
 
-from .inventory import apply_inventory_to_project, load_inventory_from_sources
+from .inventory import (
+    apply_inventory_to_project,
+    build_inventory_review,
+    inventory_items_from_review,
+)
 from .offline_validation import validate_offline_payload
 from .rules import (
     CONFIRMED_SKIP_STATUS,
@@ -893,22 +897,18 @@ def apply_writeback(
         backup_file = None
         wb.close()
 
+    inventory_review = build_inventory_review(source_json_paths)
+
     if dry_run:
-        inventory_report = {"status": "skipped", "reason": "dry-run模式不修改库存颜色"}
+        inventory_report = {
+            "status": "review_only",
+            "reason": "dry-run模式不修改库存颜色",
+            "review": inventory_review,
+        }
     else:
         inventory_report = None
         try:
-            mill_inventories: dict[str, list[Any]] = {}
-            for path in source_json_paths:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-                input_file = str(meta.get("input_file") or "").strip()
-                company = _extract_company_from_filename(input_file or path.name)
-                if not company:
-                    continue
-                inv_items = load_inventory_from_sources([path], company)
-                if inv_items:
-                    mill_inventories[company] = inv_items
+            mill_inventories = inventory_items_from_review(inventory_review)
             if mill_inventories:
                 inventory_report = apply_inventory_to_project(
                     project_excel=project_excel,
@@ -919,6 +919,8 @@ def apply_writeback(
                 )
         except Exception as exc:
             inventory_report = {"status": "error", "error": str(exc)}
+        if inventory_report is not None:
+            inventory_report["review"] = inventory_review
 
     report = {
         "phase": "apply",

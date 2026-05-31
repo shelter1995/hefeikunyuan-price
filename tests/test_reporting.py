@@ -74,22 +74,28 @@ def test_render_single_report_markdown_lists_inventory_details():
                     {
                         "mill": "桂鑫报价",
                         "sheet_mill": "桂鑫",
+                        "warehouse": "厂内",
                         "product": "螺纹",
                         "spec": "12",
                         "length": "9",
                         "material": "HRB400E",
                         "status": "充足",
                         "cell": "P16",
+                        "source_spec": "9米HRB400E螺纹12",
+                        "confidence_basis": "MiniMax视觉库存表",
                     },
                     {
                         "mill": "贵航报价",
                         "sheet_mill": "贵航",
+                        "warehouse": "",
                         "product": "圆钢",
                         "spec": "16",
                         "length": "",
                         "material": "",
                         "status": "告警",
                         "cell": "R18",
+                        "source_spec": "圆钢16（少）",
+                        "confidence_basis": "JSON库存字段",
                     },
                 ],
             },
@@ -99,9 +105,9 @@ def test_render_single_report_markdown_lists_inventory_details():
     markdown = render_single_report_markdown(result, json_report_path="运行产物/report.json")
 
     assert "### 3. 库存颜色标注明细" in markdown
-    assert "| 厂家 | 钢材型号和规格 | 库存情况 | 单元格 |" in markdown
-    assert "| 桂鑫 | 螺纹 12 9 HRB400E | 充足 | P16 |" in markdown
-    assert "| 贵航 | 圆钢 16 | 告警 | R18 |" in markdown
+    assert "| 厂家 | 仓库 | 材质 | 产品 | 规格 | 长度 | 库存情况 | 单元格 | 来源描述 |" in markdown
+    assert "| 桂鑫 | 厂内 | HRB400E | 螺纹 | 12 | 9 | 充足 | P16 | 9米HRB400E螺纹12；MiniMax视觉库存表 |" in markdown
+    assert "| 贵航 |  |  | 圆钢 | 16 |  | 告警 | R18 | 圆钢16（少）；JSON库存字段 |" in markdown
     assert "蓝色（充足）" not in markdown
     assert "新标注颜色：" not in markdown
 
@@ -150,3 +156,52 @@ def test_render_single_report_markdown_shows_pending_and_inventory_error():
     assert "徐钢" in markdown
     assert "库存颜色标注异常" in markdown
     assert "报价表sheet不存在" in markdown
+
+
+def test_render_single_report_markdown_shows_inventory_review_conflicts():
+    result = {
+        "project": "项目报价/测试项目.xlsx",
+        "mode": "image_doc",
+        "started_at": "2026-05-30T09:00:00",
+        "ended_at": "2026-05-30T09:01:00",
+        "status": "ok",
+        "image_doc": {
+            "status": "ok",
+            "apply_summary": {
+                "updated_items": [],
+                "skipped_items": [],
+            },
+            "inventory_report": {
+                "status": "review_only",
+                "reason": "dry-run模式不修改库存颜色",
+                "review": {
+                    "raw_count": 2,
+                    "selected_count": 1,
+                    "duplicate_group_count": 1,
+                    "conflict_group_count": 1,
+                    "conflict_groups": [
+                        {
+                            "company": "徐钢",
+                            "warehouse": "",
+                            "product": "螺纹",
+                            "spec": "12",
+                            "length": "9",
+                            "material": "",
+                            "statuses": ["充足", "告警"],
+                            "selected": {
+                                "status": "充足",
+                                "source_file": "ocr价格提取_徐钢.json",
+                                "source_spec": "9米螺纹12E",
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+    }
+
+    markdown = render_single_report_markdown(result, json_report_path="运行产物/report.json")
+
+    assert "### 3. 库存归并检查" in markdown
+    assert "冲突组：1" in markdown
+    assert "| 徐钢 |  | 螺纹 12 9 | 充足 / 告警 | 充足 |" in markdown

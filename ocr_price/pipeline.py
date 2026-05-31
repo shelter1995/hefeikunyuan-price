@@ -889,6 +889,7 @@ def _image_flow(
     audit_report = None
     if not apply_report.get("dry_run") and apply_summary.get("updated_items"):
         audit_report = audit_image_doc_updates(project, apply_report.get("updates") or [])
+    inventory_report = apply_report.get("inventory_report")
     return {
         "status": "ok",
         "phase": "image_apply",
@@ -898,6 +899,7 @@ def _image_flow(
         "reused_confirmed_mapping": reusable,
         "apply_summary": apply_summary,
         "audit_report": audit_report,
+        "inventory_report": inventory_report,
     }
 
 

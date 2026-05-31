@@ -19,7 +19,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 
 # 颜色定义
@@ -41,14 +41,67 @@ class InventoryItem:
 @dataclass
 class FactoryColumnMap:
     """厂家名到Excel列的映射
-    
+
     常规厂家：一个price_col
-    特殊厂家（如长江）：多个price_cols，根据库存前缀选择
+    特殊厂家（如长江）：多个extra_cols，根据仓库前缀选择
     """
     name: str
     price_col: str            # 主列（价格列）
     netdiff_col: str          # 网差列
-    extra_cols: dict[str, str] = field(default_factory=dict)  # 额外列：{"前缀": "列字母"}
+    extra_cols: dict[str, str] = field(default_factory=dict)  # 仓库→列：{"厂内": "O", "蚌埠": "Q"}
+
+
+WAREHOUSE_LABEL_TO_KEY: dict[str, str] = {
+    "钢厂": "厂内",
+    "厂内": "厂内",
+    "蚌埠库": "蚌埠",
+    "蚌埠": "蚌埠",
+    "阜阳库": "阜阳",
+    "阜阳": "阜阳",
+    "蒙城": "蒙城",
+    "合肥港": "合肥",
+    "合肥铁四局": "合肥",
+    "南京库": "南京",
+    "安庆库": "安庆",
+}
+
+
+def _resolve_row9_formula_label(ws, wb, col: int) -> str:
+    """Resolve row 9 formula cell to actual text label from source sheet."""
+    cell = ws.cell(row=9, column=col)
+    val = cell.value
+    if val is None:
+        return ""
+    if isinstance(val, str) and val.startswith("="):
+        m = re.match(r"=(\w+)!([A-Z]+)(\d+)", val)
+        if m:
+            sheet_name = m.group(1)
+            col_letter = m.group(2)
+            src_row = int(m.group(3))
+            if sheet_name in wb.sheetnames:
+                src_ws = wb[sheet_name]
+                col_idx = column_index_from_string(col_letter)
+                src_val = src_ws.cell(row=src_row, column=col_idx).value
+                return str(src_val).strip() if src_val else ""
+        return ""
+    return str(val).strip()
+
+
+def _detect_warehouse_cols(ws, wb, mill_start_col: int) -> dict[str, str]:
+    """Scan row 9 starting from mill_start_col to detect warehouse columns."""
+    warehouse_cols: dict[str, str] = {}
+    for c in range(mill_start_col, min(mill_start_col + 20, ws.max_column + 1)):
+        label = _resolve_row9_formula_label(ws, wb, c)
+        if not label:
+            continue
+        for label_keyword, wh_key in WAREHOUSE_LABEL_TO_KEY.items():
+            if label_keyword in label:
+                warehouse_cols[wh_key] = get_column_letter(c)
+                break
+        row1_val = ws.cell(row=1, column=c).value
+        if row1_val and str(row1_val).strip() and c > mill_start_col:
+            break
+    return warehouse_cols
 
 
 class InventoryColorApplier:
@@ -63,11 +116,6 @@ class InventoryColorApplier:
     # 非厂家名排除列表
     EXCLUDE_NAMES = ["合肥鲲源", "预备发货", "钢厂", "需求单位", "提货单位"]
 
-    # 特殊厂家多列配置：厂家名 -> {前缀: 列字母}
-    SPECIAL_FACTORY_COLS = {
-        "长江": {"厂内": "T", "蚌埠": "V"},
-    }
-
     def __init__(self, workbook_path: str | Path) -> None:
         self.wb = load_workbook(str(workbook_path))
         self.sheet = self.wb["报价表"]
@@ -79,7 +127,7 @@ class InventoryColorApplier:
         self.inventory_rows = self._build_inventory_row_map()
 
     def _build_factory_map(self) -> dict[str, FactoryColumnMap]:
-        """读取第1行，建立厂家名→列映射"""
+        """读取第1行，建立厂家名→列映射，通过第9行动态检测仓库列"""
         factory_map: dict[str, FactoryColumnMap] = {}
 
         for col_idx in range(1, self.sheet.max_column + 1):
@@ -93,10 +141,10 @@ class InventoryColorApplier:
 
             if name not in factory_map:
                 col_letter = get_column_letter(col_idx)
-                
-                # 检查是否有特殊多列配置
-                extra_cols = self.SPECIAL_FACTORY_COLS.get(name, {})
-                
+
+                # 动态检测仓库列
+                extra_cols = _detect_warehouse_cols(self.sheet, self.wb, col_idx)
+
                 factory_map[name] = FactoryColumnMap(
                     name=name,
                     price_col=col_letter,
