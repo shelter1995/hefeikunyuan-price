@@ -5,7 +5,7 @@ import csv
 import json
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -87,6 +87,7 @@ class SourcePrice:
     location: str
     rebar_price: int | None
     coil_price: int | None
+    extra_prices: dict[str, dict[str, int | None]] = field(default_factory=dict)
     is_adjustment: bool = False  # True if price is an adjustment value, not absolute price
     base_source: str | None = None  # Reference to base price source if adjustment
     is_electronic_negotiation: bool = False  # True if price is "电议" (electronic negotiation)
@@ -223,6 +224,72 @@ def _extract_rebar_14_from_text(text: str) -> int | None:
     return None
 
 
+def _is_changjiang_company(name: str) -> bool:
+    return "长江" in _normalize_company(name or "")
+
+
+def _source_input_file(data: dict[str, Any], path: Path) -> str:
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    return str(meta.get("input_file") or path.name).strip()
+
+
+def _source_company_from_price_payload(path: Path, data: dict[str, Any]) -> str:
+    input_file = _source_input_file(data, path)
+    filename_company = _extract_company_from_filename(input_file or path.name)
+    if filename_company:
+        return filename_company
+    company = str(data.get("company") or "").strip()
+    if company:
+        return company
+    vision = data.get("_vision_result")
+    if isinstance(vision, dict):
+        company = str(vision.get("厂家名称") or "").strip()
+        if company:
+            return company
+    return ""
+
+
+def _is_txt_input(input_file: str) -> bool:
+    return Path(input_file).suffix.lower() == ".txt"
+
+
+def _extract_direct_product_price(line: str, product_keywords: tuple[str, ...]) -> int | None:
+    product_pat = "|".join(re.escape(x) for x in product_keywords)
+    m = re.search(rf"(?<!\d)(\d{{3,5}})\s*(?:元)?\s*(?:{product_pat})", line)
+    if not m:
+        m = re.search(rf"(?:{product_pat})\D{{0,12}}(?<!\d)(\d{{3,5}})(?!\d)", line)
+    if not m:
+        return None
+    price = int(m.group(1))
+    return price if 1000 <= price <= 10000 else None
+
+
+def _parse_changjiang_txt_prices(text: str) -> dict[str, dict[str, int | None]]:
+    """Parse 长江 supplement text with separate factory and 蚌埠库 direct prices."""
+    out: dict[str, dict[str, int | None]] = {}
+    label_groups = {
+        "factory": ("厂发", "厂家", "钢厂", "厂内", "场内"),
+        "蚌埠库": ("蚌埠库", "蚌埠"),
+    }
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        for key, labels in label_groups.items():
+            if not any(label in line for label in labels):
+                continue
+            rebar = _extract_direct_product_price(line, ("螺纹钢", "螺纹"))
+            coil = _extract_direct_product_price(line, ("盘螺", "盘线", "盘圆", "高线", "线材"))
+            if rebar is None and coil is None:
+                continue
+            current = out.setdefault(key, {"rebar_price": None, "coil_price": None})
+            if rebar is not None:
+                current["rebar_price"] = rebar
+            if coil is not None:
+                current["coil_price"] = coil
+    return out
+
+
 def _missing_reference_notes(ws: Any, src: SourcePrice) -> list[str]:
     notes: list[str] = []
     if src.coil_price is not None and _coerce_price(ws["G3"].value) is None:
@@ -240,9 +307,8 @@ def _load_single_source_price(path: Path, location: str) -> SourcePrice | None:
         return None
 
     rec = _pick_record_for_location(data, location=location)
-    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-    input_file = str(meta.get("input_file") or "").strip()
-    company = _extract_company_from_filename(input_file or path.name)
+    input_file = _source_input_file(data, path)
+    company = _source_company_from_price_payload(path, data)
     if not company:
         return None
     quote_date = _resolve_quote_date(str(data.get("quote_date") or "").strip() or None, str(path))
@@ -251,6 +317,21 @@ def _load_single_source_price(path: Path, location: str) -> SourcePrice | None:
     coil_price = rec.get("coil_price") if rec else None
     rec_location = str(rec.get("location") or location) if rec else location
     is_electronic = False
+    extra_prices: dict[str, dict[str, int | None]] = {}
+
+    norm_company = _normalize_company(company)
+    raw_text = _read_source_text(input_file or str(path), ocr_json=data)
+    if _is_changjiang_company(company) and not _is_txt_input(input_file):
+        return None
+    if _is_changjiang_company(company) and raw_text:
+        changjiang_prices = _parse_changjiang_txt_prices(raw_text)
+        factory_prices = changjiang_prices.get("factory")
+        if factory_prices:
+            rebar_price = factory_prices.get("rebar_price")
+            coil_price = factory_prices.get("coil_price")
+            rec_location = "厂发"
+        if changjiang_prices.get("蚌埠库"):
+            extra_prices["蚌埠库"] = changjiang_prices["蚌埠库"]
 
     # If this is a supplement text with adjustment info, try to compute final price
     computed = None
@@ -263,16 +344,20 @@ def _load_single_source_price(path: Path, location: str) -> SourcePrice | None:
     is_adj = bool(computed and computed.get("is_adjustment"))
 
     # Special handling for 金虹: try to extract rebar Φ14 price if available
-    norm_company = _normalize_company(company)
     if "金虹" in norm_company or "金虹" in company:
-        raw_text = _read_source_text(input_file or str(path), ocr_json=data)
         if raw_text:
             price_14 = _extract_rebar_14_from_text(raw_text)
             if price_14 is not None:
                 rebar_price = price_14
                 is_adj = False  # Override adjustment if direct price found
 
-    if rebar_price is None and coil_price is None and not is_adj and not is_electronic:
+    if (
+        rebar_price is None
+        and coil_price is None
+        and not extra_prices
+        and not is_adj
+        and not is_electronic
+    ):
         return None
 
     return SourcePrice(
@@ -282,6 +367,7 @@ def _load_single_source_price(path: Path, location: str) -> SourcePrice | None:
         location=rec_location,
         rebar_price=rebar_price,
         coil_price=coil_price,
+        extra_prices=extra_prices,
         is_adjustment=is_adj,
         is_electronic_negotiation=is_electronic,
     )
@@ -319,7 +405,10 @@ def load_source_prices_with_errors(source_json_paths: list[Path], location: str)
             if sp:
                 all_prices.append(sp)
             else:
-                input_file = str(data.get("meta", {}).get("input_file") or path.name) if isinstance(data.get("meta"), dict) else path.name
+                input_file = _source_input_file(data, path)
+                source_company = _source_company_from_price_payload(path, data)
+                if _is_changjiang_company(source_company) and not _is_txt_input(input_file):
+                    continue
                 if "补充" in input_file or "supplement" in str(input_file).lower():
                     continue
                 if "records" not in data:
@@ -379,6 +468,7 @@ def load_source_prices_with_errors(source_json_paths: list[Path], location: str)
                     location=base_item.location,
                     rebar_price=final_rebar,
                     coil_price=final_coil,
+                    extra_prices={**base_item.extra_prices, **adj.extra_prices},
                     is_adjustment=False,
                 )
             )
@@ -876,7 +966,18 @@ def apply_writeback(
 
         ws = wb[sheet]
         old_h1, old_h3, old_h4 = ws["H1"].value, ws["H3"].value, ws["H4"].value
+        old_j3, old_j4 = ws["J3"].value, ws["J4"].value
         new_h1 = f"报价[{src.quote_date}]"
+        is_changjiang_sheet = (
+            _is_changjiang_company(sheet)
+            or _is_changjiang_company(source_company)
+            or _is_changjiang_company(src.company)
+        )
+        changjiang_bengbu_prices: dict[str, int | None] = {}
+        if is_changjiang_sheet:
+            changjiang_bengbu_prices = (
+                src.extra_prices.get("蚌埠库") or src.extra_prices.get("蚌埠") or {}
+            )
 
         deviation_config = PriceDeviationConfig()
         deviation_reasons: list[str] = []
@@ -896,6 +997,23 @@ def apply_writeback(
         )
         if rebar_deviation:
             deviation_reasons.append(rebar_deviation)
+        if changjiang_bengbu_prices:
+            bengbu_coil_deviation = _check_price_deviation(
+                offline_price=changjiang_bengbu_prices.get("coil_price"),
+                web_price=ws["G3"].value,
+                label="蚌埠库盘螺",
+                config=deviation_config,
+            )
+            if bengbu_coil_deviation:
+                deviation_reasons.append(bengbu_coil_deviation)
+            bengbu_rebar_deviation = _check_price_deviation(
+                offline_price=changjiang_bengbu_prices.get("rebar_price"),
+                web_price=ws["G4"].value,
+                label="蚌埠库螺纹",
+                config=deviation_config,
+            )
+            if bengbu_rebar_deviation:
+                deviation_reasons.append(bengbu_rebar_deviation)
 
         if deviation_reasons:
             skipped.append(
@@ -928,6 +1046,23 @@ def apply_writeback(
         else:
             partial_skip.append("螺纹")
 
+        j_partial_skip = []
+        if changjiang_bengbu_prices:
+            bengbu_coil = changjiang_bengbu_prices.get("coil_price")
+            bengbu_rebar = changjiang_bengbu_prices.get("rebar_price")
+            if bengbu_coil is not None:
+                ws["J3"] = bengbu_coil
+                ws["J3"].font = Font(color="FFFF0000")
+                has_update = True
+            else:
+                j_partial_skip.append("蚌埠库盘螺")
+            if bengbu_rebar is not None:
+                ws["J4"] = bengbu_rebar
+                ws["J4"].font = Font(color="FFFF0000")
+                has_update = True
+            else:
+                j_partial_skip.append("蚌埠库螺纹")
+
         # 如果两个价格都缺失，则跳过
         if not has_update:
             skipped.append(
@@ -949,23 +1084,40 @@ def apply_writeback(
                 partial_note = f"{partial_note}({skip_note})"
             else:
                 partial_note = skip_note
+        if j_partial_skip:
+            skip_note = f"跳过{'+'.join(j_partial_skip)}：价格为空，保留原值"
+            if partial_note:
+                partial_note = f"{partial_note}({skip_note})"
+            else:
+                partial_note = skip_note
 
-        updates.append(
-            {
-                "项目文件Sheet": sheet,
-                "来源厂家": source_company,
-                "来源文件": src.source_file,
-                "备注": partial_note,
-                "H1_old": old_h1,
-                "H1_new": new_h1,
-                "H3_old": old_h3,
-                "H3_new": src.coil_price if src.coil_price is not None else f"{old_h3} (保留原值)",
-                "H4_old": old_h4,
-                "H4_new": src.rebar_price if src.rebar_price is not None else f"{old_h4} (保留原值)",
-                "partial_update": bool(partial_skip),
-                "skipped_items": partial_skip if partial_skip else None,
-            }
-        )
+        update_row = {
+            "项目文件Sheet": sheet,
+            "来源厂家": source_company,
+            "来源文件": src.source_file,
+            "备注": partial_note,
+            "H1_old": old_h1,
+            "H1_new": new_h1,
+            "H3_old": old_h3,
+            "H3_new": src.coil_price if src.coil_price is not None else f"{old_h3} (保留原值)",
+            "H4_old": old_h4,
+            "H4_new": src.rebar_price if src.rebar_price is not None else f"{old_h4} (保留原值)",
+            "partial_update": bool(partial_skip or j_partial_skip),
+            "skipped_items": (partial_skip + j_partial_skip) if partial_skip or j_partial_skip else None,
+        }
+        if changjiang_bengbu_prices:
+            bengbu_coil = changjiang_bengbu_prices.get("coil_price")
+            bengbu_rebar = changjiang_bengbu_prices.get("rebar_price")
+            update_row.update(
+                {
+                    "J3_old": old_j3,
+                    "J3_new": bengbu_coil if bengbu_coil is not None else f"{old_j3} (保留原值)",
+                    "J4_old": old_j4,
+                    "J4_new": bengbu_rebar if bengbu_rebar is not None else f"{old_j4} (保留原值)",
+                }
+            )
+
+        updates.append(update_row)
 
     if dry_run:
         backup_file = None
@@ -1001,6 +1153,7 @@ def apply_writeback(
                     sheet_name="报价表",
                     mapping_json_path=mapping_json_path,
                     clear_existing_colors=True,
+                    mark_missing_as_shortage=True,
                 )
         except Exception as exc:
             inventory_report = {"status": "error", "error": str(exc)}

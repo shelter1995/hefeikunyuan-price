@@ -152,6 +152,162 @@ def test_apply_writeback_inventory_uses_review_selected_item_once(tmp_path: Path
     wb.close()
 
 
+def test_apply_writeback_changjiang_prices_from_txt_and_bengbu_to_j_column(
+    tmp_path: Path,
+):
+    project = tmp_path / "project.xlsx"
+    mapping = tmp_path / "mapping.json"
+    report = tmp_path / "report.json"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "报价表"
+    ws.cell(row=1, column=5, value="马长江")
+    mill = wb.create_sheet("长江")
+    mill["G3"] = 3650
+    mill["G4"] = 3410
+    mill["H3"] = None
+    mill["H4"] = None
+    mill["J3"] = None
+    mill["J4"] = None
+    wb.save(project)
+
+    image_json = tmp_path / "ocr价格提取_长江.json"
+    supplement_txt = tmp_path / "长江补充.txt"
+    supplement_json = tmp_path / "ocr价格提取_长江补充.json"
+    supplement_txt.write_text(
+        "厂发  3260螺纹、3520盘线\n蚌埠：3230螺纹      12*12优惠出",
+        encoding="utf-8",
+    )
+    _write_json(
+        image_json,
+        {
+            "company": "马长江",
+            "meta": {"input_file": str(tmp_path / "长江.jpg")},
+            "quote_date": "2026-05-20",
+            "records": [
+                {"location": "蚌埠", "coil_price": 3540, "rebar_price": 3280},
+            ],
+            "_vision_result": {
+                "库存情况": [
+                    {"规格": "厂内9米螺纹12E", "状态": "充足", "原始描述": ""},
+                    {"规格": "蚌埠库9米螺纹12E", "状态": "告警", "原始描述": "少"},
+                ]
+            },
+        },
+    )
+    _write_json(
+        supplement_json,
+        {
+            "company": None,
+            "meta": {"input_file": str(supplement_txt), "record_count": 0},
+            "quote_date": None,
+            "records": [],
+        },
+    )
+    _write_json(
+        mapping,
+        [
+            {
+                "项目文件Sheet": "长江",
+                "最新清单厂家Sheet": "长江",
+                "状态": "已确认匹配",
+                "说明": "",
+            }
+        ],
+    )
+
+    result = apply_writeback(
+        project_excel=project,
+        source_json_paths=[image_json, supplement_json],
+        mapping_json_path=mapping,
+        location="蚌埠",
+        report_out=report,
+        dry_run=False,
+    )
+
+    assert result["updated_count"] == 1
+    update = result["updates"][0]
+    assert update["H3_new"] == 3520
+    assert update["H4_new"] == 3260
+    assert update["J3_new"] == "None (保留原值)"
+    assert update["J4_new"] == 3230
+
+    wb = load_workbook(project)
+    ws = wb["长江"]
+    assert ws["H3"].value == 3520
+    assert ws["H4"].value == 3260
+    assert ws["J3"].value is None
+    assert ws["J4"].value == 3230
+    wb.close()
+
+
+def test_apply_writeback_ignores_changjiang_image_price_when_txt_is_absent(
+    tmp_path: Path,
+):
+    project = tmp_path / "project.xlsx"
+    mapping = tmp_path / "mapping.json"
+    report = tmp_path / "report.json"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "报价表"
+    ws.cell(row=1, column=5, value="马长江")
+    mill = wb.create_sheet("长江")
+    mill["G3"] = 3650
+    mill["G4"] = 3410
+    mill["H3"] = None
+    mill["H4"] = None
+    wb.save(project)
+
+    image_json = tmp_path / "ocr价格提取_长江.json"
+    _write_json(
+        image_json,
+        {
+            "company": "马长江",
+            "meta": {"input_file": str(tmp_path / "长江.jpg")},
+            "quote_date": "2026-05-20",
+            "records": [
+                {"location": "蚌埠", "coil_price": 3540, "rebar_price": 3280},
+            ],
+            "_vision_result": {
+                "库存情况": [
+                    {"规格": "厂内9米螺纹12E", "状态": "充足", "原始描述": ""},
+                ]
+            },
+        },
+    )
+    _write_json(
+        mapping,
+        [
+            {
+                "项目文件Sheet": "长江",
+                "最新清单厂家Sheet": "长江",
+                "状态": "已确认匹配",
+                "说明": "",
+            }
+        ],
+    )
+
+    result = apply_writeback(
+        project_excel=project,
+        source_json_paths=[image_json],
+        mapping_json_path=mapping,
+        location="蚌埠",
+        report_out=report,
+        dry_run=False,
+    )
+
+    assert result["updated_count"] == 0
+    assert result["skipped"][0]["原因"] == "来源厂家在本次图片/文档提取结果中不存在"
+
+    wb = load_workbook(project)
+    ws = wb["长江"]
+    assert ws["H3"].value is None
+    assert ws["H4"].value is None
+    wb.close()
+
+
 def test_file_sha256_changes_when_file_changes(tmp_path: Path):
     path = tmp_path / "project.xlsx"
     path.write_bytes(b"before")

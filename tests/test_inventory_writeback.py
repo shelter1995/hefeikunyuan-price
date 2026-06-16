@@ -488,6 +488,92 @@ def test_changjiang_uses_dynamic_warehouse_headers_but_only_factory_and_bengbu(
     assert ws["I12"].fill.fill_type is None
 
 
+def test_build_inventory_review_filters_changjiang_to_factory_and_bengbu(tmp_path: Path):
+    source = tmp_path / "ocr价格提取_长江.json"
+    source.write_text(
+        json.dumps(
+            {
+                "company": "马长江",
+                "_vision_result": {
+                    "库存情况": [
+                        {"规格": "厂内9米螺纹12E", "状态": "充足", "原始描述": ""},
+                        {"规格": "蚌埠库9米螺纹14E", "状态": "告警", "原始描述": "少"},
+                        {"规格": "阜阳库9米螺纹16E", "状态": "缺货", "原始描述": "无"},
+                        {"规格": "蒙城9米螺纹18E", "状态": "充足", "原始描述": ""},
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    review = build_inventory_review([source])
+
+    assert review["raw_count"] == 2
+    assert review["selected_count"] == 2
+    assert {item["warehouse"] for item in review["selected"]} == {"厂内", "蚌埠"}
+    assert {item["spec"] for item in review["selected"]} == {"12", "14"}
+
+
+def test_apply_inventory_marks_missing_coil_rows_red_without_treating_yiji_as_coil(
+    tmp_path: Path,
+):
+    project_path = tmp_path / "project.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "报价表"
+    ws.cell(row=1, column=5, value="徐钢")
+
+    ws.cell(row=10, column=1, value="一级钢")
+    ws.cell(row=10, column=2, value="6")
+    ws.cell(row=10, column=3, value=None)
+    ws.cell(row=10, column=4, value="HPB300")
+
+    for row, spec in ((13, "6"), (14, "8"), (15, "10"), (16, "12")):
+        ws.cell(row=row, column=1, value="抗震三级钢")
+        ws.cell(row=row, column=2, value=spec)
+        ws.cell(row=row, column=3, value=None)
+        ws.cell(row=row, column=4, value="HRB400E")
+
+    wb.save(project_path)
+
+    result = apply_inventory_to_project(
+        project_excel=project_path,
+        mill_inventories={
+            "徐钢": [
+                InventoryItem(
+                    product="盘螺",
+                    spec="6",
+                    length=None,
+                    material=None,
+                    status="充足",
+                    note="有货",
+                )
+            ]
+        },
+        sheet_name="报价表",
+        mark_missing_as_shortage=True,
+    )
+
+    assert result["status"] == "ok"
+    assert result["applied_count"] == 4
+    by_cell = {item["cell"]: item for item in result["applied"]}
+    assert by_cell["E13"]["status"] == "充足"
+    assert by_cell["E14"]["status"] == "缺货"
+    assert by_cell["E15"]["status"] == "缺货"
+    assert by_cell["E16"]["status"] == "缺货"
+    assert "E10" not in by_cell
+
+    wb = load_workbook(project_path)
+    ws = wb["报价表"]
+    assert ws["E13"].fill.fill_type == "solid"
+    assert ws["E13"].fill.start_color.rgb in {"004472C4", "000070C0", "FF0070C0", "0070C0"}
+    assert ws["E14"].fill.fill_type == "solid"
+    assert ws["E14"].fill.start_color.rgb in {"00FF0000", "FF0000"}
+    assert ws["E10"].fill.fill_type is None
+
+
 def test_apply_inventory_reports_each_cell_once_when_generic_and_specific_match(
     tmp_path: Path,
 ):

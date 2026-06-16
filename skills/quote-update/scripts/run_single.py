@@ -25,6 +25,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--password", help="密码")
     p.add_argument("--headless", action="store_true", help="网价抓取启用无头")
     p.add_argument("--manual-login-timeout", type=int, default=180, help="有头模式下等待人工登录的秒数")
+    p.add_argument("--chrome-cdp-url", help="连接已启动远程调试端口的Chrome，例如 http://127.0.0.1:9222")
+    p.add_argument("--force-manual-login", action="store_true", help="先停在mysteel等待人工确认登录后再抓取详情页")
     p.add_argument("--image-inputs", nargs="*", default=[], help="图片/文档原始文件")
     p.add_argument("--image-jsons", nargs="*", default=[], help="已提取OCR json")
     p.add_argument("--artifact-dir", default="运行产物", help="产物目录")
@@ -70,6 +72,10 @@ def main() -> int:
             sys.argv.append("--headless")
         if args.manual_login_timeout != 180:
             sys.argv.extend(["--manual-login-timeout", str(args.manual_login_timeout)])
+        if args.chrome_cdp_url:
+            sys.argv.extend(["--chrome-cdp-url", args.chrome_cdp_url])
+        if args.force_manual_login:
+            sys.argv.append("--force-manual-login")
         if args.dry_run:
             sys.argv.append("--dry-run")
         if args.confirm_write:

@@ -5,6 +5,7 @@ import argparse
 import base64
 import csv
 import json
+import os
 import re
 import shutil
 from datetime import datetime
@@ -668,9 +669,32 @@ def _login(
     manual_login_timeout_seconds: int = 180,
     manual_login_poll_interval_seconds: int = 3,
     diagnostics_dir: Path | None = None,
+    force_manual_login: bool = False,
 ) -> str:
     page.goto("https://www.mysteel.com/", timeout=60000, wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
+    if force_manual_login:
+        print(
+            "[web_price] 已打开 mysteel。请在该 Chrome 窗口内完成登录或重新登录，"
+            "完成后回到终端按回车继续。"
+        )
+        try:
+            input("完成登录后按回车继续...")
+        except EOFError:
+            ok, proof = _wait_for_manual_login(
+                page,
+                timeout_seconds=manual_login_timeout_seconds,
+                poll_interval_seconds=manual_login_poll_interval_seconds,
+            )
+            if ok:
+                return f"人工确认登录完成（{proof}）"
+        ok, proof = _detect_logged_in(page)
+        if ok:
+            return f"人工确认登录完成（{proof}）"
+        if diagnostics_dir is not None:
+            _write_login_diagnostics(page, diagnostics_dir, proof)
+        raise WebPriceError(f"登录失败：{proof}。请确认已在打开的Chrome窗口完成登录。")
+
     already_logged, reason = _detect_logged_in(page)
     if already_logged:
         return f"已登录，跳过登录（{reason}）"
@@ -824,7 +848,7 @@ def _get_user_data_dir() -> Path:
     return Path(__file__).parent.parent / ".chrome_user_data"
 
 
-def _launch_browser_with_state(p, headless: bool):
+def _launch_browser_with_state(p, headless: bool, chrome_cdp_url: str | None = None):
     """启动浏览器，使用持久化用户数据目录保持登录状态。
 
     返回 (browser, context, page, connection_type)
@@ -832,13 +856,14 @@ def _launch_browser_with_state(p, headless: bool):
     user_data_dir = _get_user_data_dir()
     user_data_dir.mkdir(parents=True, exist_ok=True)
 
-    # 尝试通过 CDP 连接已运行的 Chrome（Chrome MCP 等）
+    # 尝试通过 CDP 连接已运行的 Chrome（需 Chrome 以 remote-debugging-port 启动）。
+    cdp_url = (chrome_cdp_url or os.getenv("CHROME_CDP_URL") or "http://localhost:9222").strip()
     try:
-        browser = p.chromium.connect_over_cdp("http://localhost:9222")
+        browser = p.chromium.connect_over_cdp(cdp_url)
         contexts = browser.contexts
         context = contexts[0] if contexts else browser.new_context()
         page = context.pages[0] if context.pages else context.new_page()
-        print(f"[web_price] 通过 CDP 连接到已运行的 Chrome 浏览器")
+        print(f"[web_price] 通过 CDP 连接到已运行的 Chrome 浏览器: {cdp_url}")
         return browser, context, page, "cdp"
     except Exception:
         pass
@@ -867,6 +892,8 @@ def fetch_web_prices(
     report_out: Path,
     headless: bool,
     manual_login_timeout_seconds: int = 180,
+    chrome_cdp_url: str | None = None,
+    force_manual_login: bool = False,
 ) -> dict[str, Any]:
     loc = location or _parse_location(project_excel.name)[0]
     city = _city(loc)
@@ -876,7 +903,11 @@ def fetch_web_prices(
         raise WebPriceError(f"未配置地点列表页URL: {loc}，请传 --list-url 或 --detail-url")
 
     with sync_playwright() as p:
-        browser, context, page, connection_type = _launch_browser_with_state(p, headless)
+        browser, context, page, connection_type = _launch_browser_with_state(
+            p,
+            headless,
+            chrome_cdp_url=chrome_cdp_url,
+        )
 
         try:
             proof = _login(
@@ -886,6 +917,7 @@ def fetch_web_prices(
                 allow_manual_login=not headless,
                 manual_login_timeout_seconds=manual_login_timeout_seconds,
                 diagnostics_dir=report_out.parent / "网页登录失败诊断",
+                force_manual_login=force_manual_login,
             )
         except WebPriceError:
             print(
@@ -896,7 +928,11 @@ def fetch_web_prices(
                 browser.close()
             except Exception:
                 pass
-            browser, context, page, connection_type = _launch_browser_with_state(p, headless=False)
+            browser, context, page, connection_type = _launch_browser_with_state(
+                p,
+                headless=False,
+                chrome_cdp_url=chrome_cdp_url,
+            )
             proof = _login(
                 page,
                 user,
@@ -904,11 +940,27 @@ def fetch_web_prices(
                 allow_manual_login=True,
                 manual_login_timeout_seconds=manual_login_timeout_seconds,
                 diagnostics_dir=report_out.parent / "网页登录失败诊断",
+                force_manual_login=True,
             )
 
         url = detail_url or _latest_url_from_list(page, str(list_page), city)
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
-        rows = _extract_detail_rows(page)
+        try:
+            rows = _extract_detail_rows(page)
+        except WebPriceError as exc:
+            if "加密态" not in str(exc):
+                raise
+            proof = _login(
+                page,
+                user,
+                pwd,
+                allow_manual_login=True,
+                manual_login_timeout_seconds=manual_login_timeout_seconds,
+                diagnostics_dir=report_out.parent / "网页登录失败诊断",
+                force_manual_login=True,
+            )
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            rows = _extract_detail_rows(page)
         h1 = page.locator("h1").first.inner_text().strip() if page.locator("h1").count() else ""
         title = page.title()
         qdate = _parse_date(h1) or _parse_date(title) or datetime.now().strftime("%Y-%m-%d")
@@ -1317,6 +1369,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--report-out", help="fetch报告输出路径")
     p_fetch.add_argument("--headless", action="store_true", help="启用无头模式")
     p_fetch.add_argument("--manual-login-timeout", type=int, default=180, help="有头模式下等待人工登录的秒数")
+    p_fetch.add_argument("--chrome-cdp-url", help="连接已启动远程调试端口的Chrome，例如 http://127.0.0.1:9222")
+    p_fetch.add_argument("--force-manual-login", action="store_true", help="先停在mysteel等待人工确认登录后再抓取详情页")
 
     p_prepare = sub.add_parser("prepare", help="生成网价厂家待确认对照（或复用正式对照）")
     p_prepare.add_argument("--project", required=True, help="项目报价Excel路径")
@@ -1377,6 +1431,8 @@ def main() -> int:
             report_out=report_out,
             headless=args.headless,
             manual_login_timeout_seconds=args.manual_login_timeout,
+            chrome_cdp_url=args.chrome_cdp_url,
+            force_manual_login=args.force_manual_login,
         )
         if not args.output:
             target = Path("运行产物") / f"{loc}{report['quote_date']}建筑钢材原料价格清单.xlsx"

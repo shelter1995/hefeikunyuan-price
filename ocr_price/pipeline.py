@@ -715,6 +715,8 @@ def _web_flow(
     artifact_dir: Path,
     apply_if_ready: bool = True,
     manual_login_timeout_seconds: int = 180,
+    chrome_cdp_url: str | None = None,
+    force_manual_login: bool = False,
 ) -> dict[str, Any]:
     fetch_report_path = artifact_dir / f"网价提取报告_{location}_{_ts()}.json"
     raw_tmp = artifact_dir / f"_tmp_{location}_网价清单_{_ts()}.xlsx"
@@ -730,6 +732,8 @@ def _web_flow(
         report_out=fetch_report_path,
         headless=headless,
         manual_login_timeout_seconds=manual_login_timeout_seconds,
+        chrome_cdp_url=chrome_cdp_url,
+        force_manual_login=force_manual_login,
     )
     raw_excel = artifact_dir / f"{location}{fetch_report['quote_date']}建筑钢材原料价格清单.xlsx"
     if raw_excel.exists():
@@ -1020,6 +1024,8 @@ def run_single(
     refresh_image_artifacts: bool = False,
     manual_login_timeout_seconds: int = 180,
     manifest_path: Path | None = None,
+    chrome_cdp_url: str | None = None,
+    force_manual_login: bool = False,
 ) -> dict[str, Any]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     project_before_hash = _file_sha256(project) if dry_run and project.exists() else None
@@ -1072,6 +1078,8 @@ def run_single(
                 artifact_dir=artifact_dir,
                 apply_if_ready=not dry_run,
                 manual_login_timeout_seconds=manual_login_timeout_seconds,
+                chrome_cdp_url=chrome_cdp_url,
+                force_manual_login=force_manual_login,
             )
         web_pending = result["web"].get("status") == "pending_confirmation"
 
@@ -1178,6 +1186,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_single.add_argument("--password", help="网站密码")
     p_single.add_argument("--headless", action="store_true", help="网价抓取使用无头浏览器")
     p_single.add_argument("--manual-login-timeout", type=int, default=180, help="有头模式下等待人工登录的秒数")
+    p_single.add_argument("--chrome-cdp-url", help="连接已启动远程调试端口的Chrome，例如 http://127.0.0.1:9222")
+    p_single.add_argument("--force-manual-login", action="store_true", help="先停在mysteel等待人工确认登录后再抓取详情页")
     p_single.add_argument("--image-inputs", nargs="*", default=[], help="图片/文档原始文件（自动先OCR）")
     p_single.add_argument("--image-jsons", nargs="*", default=[], help="已提取的OCR结果json列表")
     p_single.add_argument("--artifact-dir", default="运行产物", help="产物目录")
@@ -1199,6 +1209,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--password", help="网站密码")
     p_batch.add_argument("--headless", action="store_true", help="网价抓取使用无头浏览器")
     p_batch.add_argument("--manual-login-timeout", type=int, default=180, help="有头模式下等待人工登录的秒数")
+    p_batch.add_argument("--chrome-cdp-url", help="连接已启动远程调试端口的Chrome，例如 http://127.0.0.1:9222")
+    p_batch.add_argument("--force-manual-login", action="store_true", help="先停在mysteel等待人工确认登录后再抓取详情页")
     p_batch.add_argument("--image-source-map", help="批量图片源映射json：{项目文件名:[json或原始文件...]}")
     p_batch.add_argument("--artifact-dir", default="运行产物", help="产物目录")
     p_batch.add_argument("--dry-run", action="store_true", help="预演流程，只生成报告，不修改项目Excel")
@@ -1277,6 +1289,8 @@ def main() -> int:
                 refresh_image_artifacts=args.refresh_image_artifacts,
                 manual_login_timeout_seconds=args.manual_login_timeout,
                 manifest_path=Path(args.manifest) if args.manifest else None,
+                chrome_cdp_url=args.chrome_cdp_url,
+                force_manual_login=args.force_manual_login,
             )
             if args.dry_run:
                 manifest_out = _manifest_path(project_artifact_dir)
@@ -1345,6 +1359,8 @@ def main() -> int:
                 refresh_web_artifacts=args.refresh_web_artifacts,
                 refresh_image_artifacts=args.refresh_image_artifacts,
                 manual_login_timeout_seconds=args.manual_login_timeout,
+                chrome_cdp_url=args.chrome_cdp_url,
+                force_manual_login=args.force_manual_login,
             )
             summary["results"].append(result)
             _print_result_details(result)

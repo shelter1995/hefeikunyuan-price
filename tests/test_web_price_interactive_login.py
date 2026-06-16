@@ -152,6 +152,37 @@ def test_login_failure_writes_diagnostics(monkeypatch, tmp_path: Path):
     assert (tmp_path / "login_failure.html").exists()
 
 
+def test_login_force_manual_waits_for_user_confirmation(monkeypatch):
+    page = _FakePage()
+    states = [
+        (True, "顶部导航已显示登录态标记"),
+    ]
+    prompts: list[str] = []
+
+    def fake_detect_logged_in(page_arg, retry=False):
+        return states.pop(0)
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr(web_price, "_detect_logged_in", fake_detect_logged_in)
+    monkeypatch.setattr(web_price, "input", fake_input, raising=False)
+
+    proof = web_price._login(
+        page,
+        "user",
+        "pwd",
+        allow_manual_login=True,
+        manual_login_timeout_seconds=2,
+        manual_login_poll_interval_seconds=1,
+        force_manual_login=True,
+    )
+
+    assert "人工确认登录完成" in proof
+    assert prompts
+
+
 def test_fetch_web_prices_falls_back_from_cdp_to_persistent_browser(monkeypatch, tmp_path: Path):
     calls: list[str] = []
     page = _FakePage()
@@ -173,11 +204,11 @@ def test_fetch_web_prices_falls_back_from_cdp_to_persistent_browser(monkeypatch,
     def fake_sync_playwright():
         return _FakeSyncPlaywright()
 
-    def fake_launch_browser_with_state(p, headless):
+    def fake_launch_browser_with_state(p, headless, chrome_cdp_url=None):
         calls.append(f"launch:{headless}")
         return _FakeBrowser(), _FakeBrowser(), page, "cdp" if len(calls) == 1 else "persistent"
 
-    def fake_login(page_arg, user, pwd, allow_manual_login, manual_login_timeout_seconds, diagnostics_dir=None):
+    def fake_login(page_arg, user, pwd, allow_manual_login, manual_login_timeout_seconds, diagnostics_dir=None, force_manual_login=False):
         calls.append(f"login:{allow_manual_login}")
         if len([x for x in calls if x.startswith("login:")]) == 1:
             raise web_price.WebPriceError("CDP登录态失效")
@@ -208,3 +239,109 @@ def test_fetch_web_prices_falls_back_from_cdp_to_persistent_browser(monkeypatch,
 
     assert report["login_proof"] == "人工登录成功"
     assert calls[:4] == ["launch:True", "login:False", "close", "launch:False"]
+
+
+def test_fetch_web_prices_retries_after_encrypted_detail_with_manual_login(monkeypatch, tmp_path: Path):
+    calls: list[str] = []
+    page = _FakePage()
+
+    class _FakePlaywright:
+        chromium = object()
+
+    class _FakeSyncPlaywright:
+        def __enter__(self):
+            return _FakePlaywright()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeBrowser:
+        def close(self):
+            calls.append("close")
+
+    extract_calls = {"count": 0}
+
+    def fake_extract_detail_rows(page_arg):
+        extract_calls["count"] += 1
+        if extract_calls["count"] == 1:
+            raise web_price.WebPriceError("详情页价格仍为加密态（icon-key存在），请检查登录状态")
+        return [{"钢厂/产地": "测试钢厂"}]
+
+    def fake_login(page_arg, user, pwd, allow_manual_login, manual_login_timeout_seconds, diagnostics_dir=None, force_manual_login=False):
+        calls.append(f"login:{force_manual_login}")
+        return "登录成功"
+
+    monkeypatch.setattr(web_price, "sync_playwright", lambda: _FakeSyncPlaywright())
+    monkeypatch.setattr(web_price, "_parse_credentials", lambda *args, **kwargs: ("u", "p"))
+    monkeypatch.setattr(web_price, "_launch_browser_with_state", lambda *args, **kwargs: (_FakeBrowser(), _FakeBrowser(), page, "persistent"))
+    monkeypatch.setattr(web_price, "_login", fake_login)
+    monkeypatch.setattr(web_price, "_latest_url_from_list", lambda *args, **kwargs: "https://example.com/detail")
+    monkeypatch.setattr(web_price, "_extract_detail_rows", fake_extract_detail_rows)
+    monkeypatch.setattr(web_price, "_parse_date", lambda text: "2026-06-16")
+    monkeypatch.setattr(web_price, "_export_raw", lambda rows, output_excel: output_excel.write_text("raw", encoding="utf-8"))
+    monkeypatch.setattr(web_price, "_source_mills", lambda rows: ["测试钢厂"])
+
+    report = web_price.fetch_web_prices(
+        project_excel=tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx",
+        location="安徽合肥",
+        list_url="https://example.com/list",
+        detail_url=None,
+        account_file=tmp_path / "account.txt",
+        username=None,
+        password=None,
+        output_excel=tmp_path / "raw.xlsx",
+        report_out=tmp_path / "report.json",
+        headless=False,
+    )
+
+    assert report["row_count"] == 1
+    assert calls[:2] == ["login:False", "login:True"]
+
+
+def test_fetch_web_prices_passes_chrome_cdp_url_to_launcher(monkeypatch, tmp_path: Path):
+    seen: dict[str, str | None] = {}
+    page = _FakePage()
+
+    class _FakePlaywright:
+        chromium = object()
+
+    class _FakeSyncPlaywright:
+        def __enter__(self):
+            return _FakePlaywright()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeBrowser:
+        def close(self):
+            return None
+
+    def fake_launch_browser_with_state(p, headless, chrome_cdp_url=None):
+        seen["chrome_cdp_url"] = chrome_cdp_url
+        return _FakeBrowser(), _FakeBrowser(), page, "cdp"
+
+    monkeypatch.setattr(web_price, "sync_playwright", lambda: _FakeSyncPlaywright())
+    monkeypatch.setattr(web_price, "_parse_credentials", lambda *args, **kwargs: ("u", "p"))
+    monkeypatch.setattr(web_price, "_launch_browser_with_state", fake_launch_browser_with_state)
+    monkeypatch.setattr(web_price, "_login", lambda *args, **kwargs: "已登录")
+    monkeypatch.setattr(web_price, "_latest_url_from_list", lambda *args, **kwargs: "https://example.com/detail")
+    monkeypatch.setattr(web_price, "_extract_detail_rows", lambda page_arg: [{"钢厂/产地": "测试钢厂"}])
+    monkeypatch.setattr(web_price, "_parse_date", lambda text: "2026-06-16")
+    monkeypatch.setattr(web_price, "_export_raw", lambda rows, output_excel: output_excel.write_text("raw", encoding="utf-8"))
+    monkeypatch.setattr(web_price, "_source_mills", lambda rows: ["测试钢厂"])
+
+    web_price.fetch_web_prices(
+        project_excel=tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx",
+        location="安徽合肥",
+        list_url="https://example.com/list",
+        detail_url=None,
+        account_file=tmp_path / "account.txt",
+        username=None,
+        password=None,
+        output_excel=tmp_path / "raw.xlsx",
+        report_out=tmp_path / "report.json",
+        headless=True,
+        chrome_cdp_url="http://127.0.0.1:9222",
+    )
+
+    assert seen["chrome_cdp_url"] == "http://127.0.0.1:9222"

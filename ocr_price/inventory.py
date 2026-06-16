@@ -238,23 +238,26 @@ def load_inventory_from_sources(
 def build_inventory_review(source_json_paths: list[Path]) -> dict[str, Any]:
     """Build a dry-run friendly inventory normalization and conflict report."""
     raw_items: list[dict[str, Any]] = []
+    filtered_count = 0
     for path in source_json_paths:
         data = _load_json_safe(path)
         if not data:
             continue
         company = _source_company_from_payload(path, data)
         for entry in _raw_inventory_items_from_payload(path, data):
-            raw_items.append(
-                _inventory_item_review_dict(
-                    entry.item,
-                    company,
-                    path.name,
-                    entry.source_spec,
-                    entry.source_kind,
-                    entry.confidence_basis,
-                    entry.source_priority,
-                )
+            review_item = _inventory_item_review_dict(
+                entry.item,
+                company,
+                path.name,
+                entry.source_spec,
+                entry.source_kind,
+                entry.confidence_basis,
+                entry.source_priority,
             )
+            if not _inventory_review_item_allowed_for_company(company, review_item):
+                filtered_count += 1
+                continue
+            raw_items.append(review_item)
 
     groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = {}
     for item in raw_items:
@@ -299,6 +302,7 @@ def build_inventory_review(source_json_paths: list[Path]) -> dict[str, Any]:
     return {
         "status": "ok",
         "raw_count": len(raw_items),
+        "filtered_count": filtered_count,
         "selected_count": len(selected),
         "duplicate_group_count": len(duplicate_groups),
         "conflict_group_count": len(conflict_groups),
@@ -460,6 +464,14 @@ def _inventory_item_review_dict(
         "status": item.status,
         "note": item.note,
     }
+
+
+def _inventory_review_item_allowed_for_company(company: str, item: dict[str, Any]) -> bool:
+    allowed = _allowed_warehouses_for_mill(company)
+    if allowed is None:
+        return True
+    warehouse = _normalize_warehouse_key(str(item.get("warehouse") or "").strip() or None)
+    return warehouse in allowed
 
 
 def _load_json_safe(path: Path) -> dict[str, Any] | None:
@@ -805,12 +817,60 @@ def _build_warehouse_col_map(ws: Any, wb: Any, mill_start_col: int) -> dict[str,
     return warehouse_cols
 
 
+def _target_column_for_inventory_item(
+    item: InventoryItem,
+    default_col: int,
+    warehouse_cols: dict[str, int],
+    allowed_warehouses: set[str] | None,
+) -> int | None:
+    if not item.warehouse:
+        if allowed_warehouses is not None and warehouse_cols:
+            return None
+        return default_col
+
+    warehouse_key = _normalize_warehouse_key(item.warehouse)
+    if allowed_warehouses is not None and warehouse_key not in allowed_warehouses:
+        return None
+    if not warehouse_cols:
+        return default_col
+
+    mapped_col = warehouse_cols.get(warehouse_key or item.warehouse)
+    if mapped_col:
+        return mapped_col
+    if item.warehouse in WAREHOUSE_LABEL_TO_KEY:
+        mapped_col = warehouse_cols.get(WAREHOUSE_LABEL_TO_KEY[item.warehouse])
+        if mapped_col:
+            return mapped_col
+    return None
+
+
+def _warehouse_label_for_column(warehouse_cols: dict[str, int], col: int) -> str | None:
+    for warehouse, wh_col in warehouse_cols.items():
+        if wh_col == col:
+            return warehouse
+    return None
+
+
+def _row_should_be_marked_missing(
+    row_info: dict[str, Any],
+    observed_items: list[InventoryItem],
+) -> bool:
+    for item in observed_items:
+        if (
+            _match_product(item.product, row_info["product"])
+            and _match_material(item.material, row_info["material"] or "")
+        ):
+            return True
+    return False
+
+
 def apply_inventory_to_project(
     project_excel: Path,
     mill_inventories: dict[str, list[InventoryItem]],
     sheet_name: str = "报价表",
     mapping_json_path: Path | None = None,
     clear_existing_colors: bool = False,
+    mark_missing_as_shortage: bool = False,
 ) -> dict[str, Any]:
     """
     Apply inventory colors to the quote sheet.
@@ -922,26 +982,18 @@ def apply_inventory_to_project(
         if allowed_warehouses is None and matched_mill:
             allowed_warehouses = _allowed_warehouses_for_mill(matched_mill)
 
+        observed_items_by_col: dict[int, list[InventoryItem]] = {}
         for item in items:
             # Determine target column: use warehouse-specific column if available
-            item_col = target_col
-            if item.warehouse and wh_cols:
-                warehouse_key = _normalize_warehouse_key(item.warehouse)
-                if allowed_warehouses is not None and warehouse_key not in allowed_warehouses:
-                    continue
-                mapped_col = wh_cols.get(warehouse_key or item.warehouse)
-                if mapped_col:
-                    item_col = mapped_col
-                elif item.warehouse in WAREHOUSE_LABEL_TO_KEY:
-                    key = WAREHOUSE_LABEL_TO_KEY[item.warehouse]
-                    mapped_col = wh_cols.get(key)
-                    if mapped_col:
-                        item_col = mapped_col
-                    else:
-                        # Warehouse not in this mill's columns, skip
-                        continue
-                else:
-                    continue
+            item_col = _target_column_for_inventory_item(
+                item,
+                target_col,
+                wh_cols,
+                allowed_warehouses,
+            )
+            if item_col is None:
+                continue
+            observed_items_by_col.setdefault(item_col, []).append(item)
 
             # Find matching row
             for row_info in row_map:
@@ -980,6 +1032,40 @@ def apply_inventory_to_project(
                         "confidence_basis": item.confidence_basis,
                     })
                     break
+
+        if mark_missing_as_shortage:
+            for item_col, observed_items in observed_items_by_col.items():
+                warehouse_label = _warehouse_label_for_column(wh_cols, item_col)
+                for row_info in row_map:
+                    if not _row_should_be_marked_missing(row_info, observed_items):
+                        continue
+                    applied_key = (_norm_text(resolved_mill), row_info["row"], item_col)
+                    if applied_key in applied_cells:
+                        continue
+                    applied_cells.add(applied_key)
+                    cell = ws.cell(row=row_info["row"], column=item_col)
+                    cell.fill = FILL_RED
+                    applied.append({
+                        "mill": source_mill,
+                        "sheet_mill": resolved_mill,
+                        "row": row_info["row"],
+                        "col": item_col,
+                        "cell": cell.coordinate,
+                        "product": row_info["product"],
+                        "spec": row_info["spec"],
+                        "length": row_info["length"],
+                        "material": row_info["material"],
+                        "warehouse": warehouse_label,
+                        "status": "缺货",
+                        "source_file": "",
+                        "source_spec": (
+                            f"{row_info['length']}米{row_info['product']}{row_info['spec']}"
+                            if row_info["length"]
+                            else f"{row_info['product']}{row_info['spec']}"
+                        ),
+                        "source_kind": "missing_inventory",
+                        "confidence_basis": "图片未给出该型号，按缺货标注",
+                    })
 
     wb.save(project_excel)
     return {
