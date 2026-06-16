@@ -221,3 +221,81 @@ def test_run_batch_wrapper_exposes_manifest_argument():
 
     assert result.returncode == 0
     assert b"--manifest" in result.stdout
+
+
+def test_run_ocr_for_inputs_continues_and_reports_each_file(monkeypatch, tmp_path: Path):
+    ok_input = tmp_path / "ok.jpg"
+    bad_input = tmp_path / "bad.jpg"
+    ok_input.write_bytes(b"ok")
+    bad_input.write_bytes(b"bad")
+    artifact_dir = tmp_path / "artifacts"
+
+    def fake_run(cmd, check, env, capture_output, text, encoding, errors):
+        out = Path(cmd[cmd.index("--output") + 1])
+        if "ok" in str(cmd[cmd.index("--input") + 1]):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text('{"records":[]}', encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="MiniMax timeout")
+
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+
+    report = pipeline._run_ocr_for_inputs(
+        [ok_input, bad_input],
+        location="蚌埠",
+        artifact_dir=artifact_dir,
+    )
+
+    assert report["success_count"] == 1
+    assert report["failed_count"] == 1
+    assert report["outputs"] == [str(artifact_dir / "ocr价格提取_ok.json")]
+    assert report["items"][0]["status"] == "ok"
+    assert report["items"][1]["status"] == "failed"
+    assert "MiniMax timeout" in report["items"][1]["stderr"]
+
+
+def test_run_single_blocks_when_any_ocr_input_fails(monkeypatch, tmp_path: Path):
+    project = tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx"
+    project.write_bytes(b"project")
+    image = tmp_path / "bad.jpg"
+    image.write_bytes(b"bad")
+
+    def fake_run_ocr_for_inputs(*args, **kwargs):
+        return {
+            "outputs": [],
+            "items": [
+                {
+                    "input": str(image),
+                    "output": str(tmp_path / "artifacts" / "ocr价格提取_bad.json"),
+                    "status": "failed",
+                    "stderr": "MiniMax timeout",
+                }
+            ],
+            "success_count": 0,
+            "failed_count": 1,
+        }
+
+    def fail_image_flow(*args, **kwargs):
+        raise AssertionError("OCR失败后不应继续图片/文档回写流程")
+
+    monkeypatch.setattr(pipeline, "_run_ocr_for_inputs", fake_run_ocr_for_inputs)
+    monkeypatch.setattr(pipeline, "_image_flow", fail_image_flow)
+
+    result = pipeline.run_single(
+        project=project,
+        mode="image_doc",
+        list_url=None,
+        detail_url=None,
+        account_file=tmp_path / "网站账号密码.txt",
+        username=None,
+        password=None,
+        headless=True,
+        image_inputs=[image],
+        image_jsons=[],
+        artifact_dir=tmp_path / "artifacts",
+        dry_run=True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["image_doc"]["phase"] == "ocr"
+    assert result["image_doc"]["ocr_report"]["failed_count"] == 1

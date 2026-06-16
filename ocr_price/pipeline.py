@@ -27,6 +27,7 @@ from .writeback_image_doc import (
     CONFIRMED_WRITE_STATUS as IMG_CONFIRMED_WRITE_STATUS,
     apply_writeback as apply_image_writeback,
     load_source_prices,
+    load_source_prices_with_errors,
     prepare_mapping as prepare_image_mapping,
 )
 from .reporting import render_single_report_markdown
@@ -41,7 +42,7 @@ from .xlsx_utils import load_workbook_safe
 
 SKIP_SHEETS = {"报价表"}
 DEFAULT_OFFLINE_DIR = Path("线下报价")
-OFFLINE_SOURCE_SUFFIXES = {".jpg", ".jpeg", ".png", ".pdf", ".txt", ".json"}
+OFFLINE_SOURCE_SUFFIXES = {".jpg", ".jpeg", ".png", ".txt", ".json"}
 OCR_JSON_GLOB = "ocr价格提取_*.json"
 
 
@@ -218,9 +219,10 @@ def _default_ocr_output(input_file: Path, artifact_dir: Path) -> Path:
     return artifact_dir / f"ocr价格提取_{input_file.stem}.json"
 
 
-def _run_ocr_for_inputs(inputs: list[Path], location: str, artifact_dir: Path) -> list[Path]:
+def _run_ocr_for_inputs(inputs: list[Path], location: str, artifact_dir: Path) -> dict[str, Any]:
     """Run OCR for input files. All image/PDF files use MiniMax vision recognition."""
-    outputs: list[Path] = []
+    outputs: list[str] = []
+    items: list[dict[str, Any]] = []
     # Set UTF-8 encoding for child processes to avoid UnicodeEncodeError on Windows
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -239,9 +241,35 @@ def _run_ocr_for_inputs(inputs: list[Path], location: str, artifact_dir: Path) -
         ]
         # All image and PDF files use MiniMax vision recognition by default
         # Text files (.txt) will be auto-detected and processed with text parser
-        subprocess.run(cmd, check=True, env=env)
-        outputs.append(out)
-    return outputs
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        item = {
+            "input": str(src),
+            "output": str(out),
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+        if completed.returncode == 0 and out.exists():
+            item["status"] = "ok"
+            outputs.append(str(out))
+        else:
+            item["status"] = "failed"
+        items.append(item)
+    failed_count = sum(1 for item in items if item.get("status") == "failed")
+    return {
+        "outputs": outputs,
+        "items": items,
+        "success_count": len(outputs),
+        "failed_count": failed_count,
+    }
 
 
 def _pending_details(mapping_json: Path, project_excel: Path | None = None) -> dict[str, Any]:
@@ -818,7 +846,17 @@ def _image_flow(
         if pending_csv.exists():
             shutil.copy2(pending_csv, confirmed_csv)
 
-    source_prices = load_source_prices(source_jsons, location=_city(location))
+    source_load = load_source_prices_with_errors(source_jsons, location=_city(location))
+    if source_load.errors:
+        return {
+            "status": "failed",
+            "phase": "image_validate",
+            "location": location,
+            "source_jsons": [str(p) for p in source_jsons],
+            "reason": "OCR JSON校验失败，已停止图片/文档链路",
+            "source_errors": source_load.errors,
+        }
+    source_prices = source_load.prices
     source_set = {_norm_company(x.company) for x in source_prices if _norm_company(x.company)}
 
     reusable = False
@@ -1050,7 +1088,35 @@ def run_single(
         else:
             json_sources = list(image_jsons)
             if image_inputs:
-                json_sources.extend(_run_ocr_for_inputs(image_inputs, location=_city(image_location), artifact_dir=artifact_dir))
+                ocr_report = _run_ocr_for_inputs(
+                    image_inputs,
+                    location=_city(image_location),
+                    artifact_dir=artifact_dir,
+                )
+                result["ocr_report"] = ocr_report
+                json_sources.extend(Path(x) for x in ocr_report.get("outputs", []) or [])
+                if int(ocr_report.get("failed_count") or 0) > 0:
+                    result["image_doc"] = {
+                        "status": "failed",
+                        "phase": "ocr",
+                        "location": image_location,
+                        "reason": "存在图片/文档识别失败，已停止图片/文档链路",
+                        "ocr_report": ocr_report,
+                    }
+                    result["status"] = "failed"
+                    result["ended_at"] = datetime.now().isoformat(timespec="seconds")
+                    append_event(
+                        result,
+                        stage="image_doc",
+                        level="error",
+                        message="图片/文档识别失败，流程已阻断",
+                        data={"failed_count": ocr_report.get("failed_count")},
+                    )
+                    if dry_run and project_before_hash is not None:
+                        _assert_dry_run_unchanged(project, project_before_hash)
+                        result["project_excel_hash_before"] = project_before_hash
+                        result["project_excel_hash_after"] = _file_sha256(project)
+                    return result
 
             # 步骤1：生成厂家名称对照表，等待用户确认
             factory_mapping = _build_factory_mapping(project, json_sources)
@@ -1067,6 +1133,16 @@ def run_single(
                 apply_if_ready=not image_prepare_only,
                 dry_run=dry_run,
             )
+
+    if result.get("web", {}).get("status") == "failed" or result.get("image_doc", {}).get("status") == "failed":
+        result["status"] = "failed"
+        result["ended_at"] = datetime.now().isoformat(timespec="seconds")
+        append_event(result, stage="pipeline", level="error", message="存在失败项，流程已停止")
+        if dry_run and project_before_hash is not None:
+            _assert_dry_run_unchanged(project, project_before_hash)
+            result["project_excel_hash_before"] = project_before_hash
+            result["project_excel_hash_after"] = _file_sha256(project)
+        return result
 
     if result.get("web", {}).get("status") == "pending_confirmation" or result.get("image_doc", {}).get("status") == "pending_confirmation":
         result["status"] = "pending_confirmation"

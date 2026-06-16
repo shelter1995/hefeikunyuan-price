@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,10 +42,13 @@ class MiniMaxVisionClient:
         if not path.exists():
             raise MiniMaxVisionError(f"Image not found: {path}")
 
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            raise MiniMaxVisionError("PDF input is not supported. 请先将PDF转换为图片后再识别。")
+
         file_bytes = path.read_bytes()
         b64 = base64.b64encode(file_bytes).decode("utf-8")
 
-        suffix = path.suffix.lower()
         mime = "image/jpeg"
         if suffix == ".png":
             mime = "image/png"
@@ -64,18 +68,26 @@ class MiniMaxVisionClient:
             "Content-Type": "application/json",
         }
 
-        resp = requests.post(
-            self.VLM_URL,
-            headers=headers,
-            json=payload,
-            timeout=self.timeout,
-        )
+        try:
+            resp = requests.post(
+                self.VLM_URL,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise MiniMaxVisionError(f"MiniMax VLM request failed: {exc}") from exc
         if not resp.ok:
             raise MiniMaxVisionError(
                 f"MiniMax VLM API failed ({resp.status_code}): {resp.text[:500]}"
             )
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise MiniMaxVisionError(
+                f"MiniMax VLM returned non-JSON response: {resp.text[:500]}"
+            ) from exc
         if save_raw_path:
             raw_path = Path(save_raw_path)
             raw_path.parent.mkdir(parents=True, exist_ok=True)
@@ -306,6 +318,7 @@ def analyze_quote_image_with_retry(
 
     all_results: list[dict[str, Any]] = []
     all_raw_texts: list[str] = []
+    attempt_errors: list[str] = []
 
     for attempt in range(max_retries):
         try:
@@ -318,9 +331,12 @@ def analyze_quote_image_with_retry(
             all_results.append(result)
             source = result.get("_source", {})
             all_raw_texts.append(source.get("raw_text", ""))
-        except MiniMaxVisionError:
+        except MiniMaxVisionError as exc:
+            attempt_errors.append(f"attempt {attempt + 1}: {exc}")
             if attempt == max_retries - 1 and not all_results:
                 raise
+            if attempt < max_retries - 1:
+                time.sleep(min(2 ** attempt, 8))
             continue
 
     if not all_results:
@@ -332,6 +348,7 @@ def analyze_quote_image_with_retry(
         "image_path": str(image_path),
         "raw_texts": all_raw_texts,
         "attempt_count": len(all_results),
+        "attempt_errors": attempt_errors,
     }
 
     if save_raw_path:

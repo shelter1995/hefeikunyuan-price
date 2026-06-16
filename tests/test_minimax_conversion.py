@@ -1,3 +1,8 @@
+from pathlib import Path
+
+import pytest
+import requests
+
 from ocr_price import minimax_vision
 from ocr_price.parser import parse_inventory_from_text
 
@@ -101,3 +106,29 @@ def test_parse_inventory_from_text_keeps_material_and_full_chinese_note():
         "原始描述": "配货",
         "材质": "HRB400E",
     } in inventory
+
+
+def test_analyze_image_wraps_request_failure_as_minimax_error(monkeypatch, tmp_path: Path):
+    image = tmp_path / "quote.jpg"
+    image.write_bytes(b"fake")
+
+    def fake_post(*args, **kwargs):
+        raise requests.Timeout("timeout")
+
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    monkeypatch.setattr(minimax_vision.requests, "post", fake_post)
+
+    client = minimax_vision.MiniMaxVisionClient()
+    with pytest.raises(minimax_vision.MiniMaxVisionError, match="request failed"):
+        client.analyze_image(image, prompt="test")
+
+
+def test_analyze_image_rejects_pdf_input(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / "quote.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+
+    client = minimax_vision.MiniMaxVisionClient()
+
+    with pytest.raises(minimax_vision.MiniMaxVisionError, match="PDF"):
+        client.analyze_image(pdf, prompt="test")

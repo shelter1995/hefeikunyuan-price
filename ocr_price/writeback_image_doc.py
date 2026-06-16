@@ -92,6 +92,12 @@ class SourcePrice:
     is_electronic_negotiation: bool = False  # True if price is "电议" (electronic negotiation)
 
 
+@dataclass
+class SourcePriceLoadResult:
+    prices: list[SourcePrice]
+    errors: list[dict[str, Any]]
+
+
 def _extract_company_from_filename(filename: str) -> str:
     """
     Extract manufacturer from file name, e.g.:
@@ -282,6 +288,10 @@ def _load_single_source_price(path: Path, location: str) -> SourcePrice | None:
 
 
 def load_source_prices(source_json_paths: list[Path], location: str) -> list[SourcePrice]:
+    return load_source_prices_with_errors(source_json_paths, location=location).prices
+
+
+def load_source_prices_with_errors(source_json_paths: list[Path], location: str) -> SourcePriceLoadResult:
     """Load source prices, merging base prices with adjustments for the same mill.
     
     Priority rules:
@@ -291,12 +301,44 @@ def load_source_prices(source_json_paths: list[Path], location: str) -> list[Sou
     """
     # First pass: collect all source prices
     all_prices: list[SourcePrice] = []
+    errors: list[dict[str, Any]] = []
     for path in source_json_paths:
         try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            validation = validate_offline_payload(data, target_location=location)
+            if not validation.is_valid:
+                errors.append(
+                    {
+                        "source_json": str(path),
+                        "error_type": "validation",
+                        "errors": validation.errors,
+                    }
+                )
+                continue
             sp = _load_single_source_price(path, location)
             if sp:
                 all_prices.append(sp)
-        except Exception:
+            else:
+                input_file = str(data.get("meta", {}).get("input_file") or path.name) if isinstance(data.get("meta"), dict) else path.name
+                if "补充" in input_file or "supplement" in str(input_file).lower():
+                    continue
+                if "records" not in data:
+                    continue
+                errors.append(
+                    {
+                        "source_json": str(path),
+                        "error_type": "empty_price",
+                        "errors": ["未提取到目标地点有效价格"],
+                    }
+                )
+        except Exception as exc:
+            errors.append(
+                {
+                    "source_json": str(path),
+                    "error_type": type(exc).__name__,
+                    "errors": [str(exc)],
+                }
+            )
             continue
 
     # Group by normalized company name
@@ -354,7 +396,7 @@ def load_source_prices(source_json_paths: list[Path], location: str) -> list[Sou
         elif adj_items:
             output.append(adj_items[0])
 
-    return output
+    return SourcePriceLoadResult(prices=output, errors=errors)
 
 
 def _semantic_cache_key(location: str) -> str:
@@ -576,7 +618,27 @@ def prepare_mapping(
     report_out: Path,
 ) -> dict[str, Any]:
     wb = load_workbook_safe(project_excel)
-    sources = load_source_prices(source_json_paths, location=location)
+    source_load = load_source_prices_with_errors(source_json_paths, location=location)
+    sources = source_load.prices
+    if source_load.errors:
+        report = {
+            "phase": "prepare",
+            "project_excel": project_excel.name,
+            "location": location,
+            "mapping_json": str(mapping_json_out),
+            "mapping_csv": str(mapping_csv_out),
+            "blocked": True,
+            "blocked_reason": "OCR JSON校验失败，已停止图片/文档对照生成",
+            "source_errors": source_load.errors,
+            "total_rows": 0,
+            "pending_count": 0,
+            "conflict_count": 0,
+            "unmatched_count": 0,
+            "unmapped_sources": [],
+        }
+        report_out.parent.mkdir(parents=True, exist_ok=True)
+        report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
 
     mapping_rows: list[dict[str, str]] = []
     used_sources: set[str] = set()
@@ -689,7 +751,30 @@ def apply_writeback(
     mapping_rows = _dedupe_mapping_rows(raw_mapping_rows)
     deduped_row_count = max(0, len(raw_mapping_rows) - len(mapping_rows))
 
-    sources = load_source_prices(source_json_paths, location=location)
+    source_load = load_source_prices_with_errors(source_json_paths, location=location)
+    sources = source_load.prices
+    if source_load.errors:
+        report = {
+            "phase": "apply",
+            "project_excel": project_excel.name,
+            "location": location,
+            "mapping_json": str(mapping_json_path),
+            "mapping_row_count": len(mapping_rows),
+            "deduped_row_count": deduped_row_count,
+            "blocked": True,
+            "blocked_reason": "OCR JSON校验失败，已停止写价",
+            "source_errors": source_load.errors,
+            "dry_run": dry_run,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "backup_file": None,
+            "updates": [],
+            "skipped": [],
+            "inventory_report": None,
+        }
+        report_out.parent.mkdir(parents=True, exist_ok=True)
+        report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
     source_map = _source_lookup(sources)
 
     confirmed_or_accepted_sources: set[str] = set()

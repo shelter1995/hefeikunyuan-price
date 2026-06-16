@@ -627,6 +627,39 @@ def _wait_for_manual_login(
     return False, "等待人工登录超时，仍未检测到登录态"
 
 
+def _write_login_diagnostics(page: Any, diagnostics_dir: Path, reason: str) -> dict[str, str]:
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = diagnostics_dir / "login_failure.png"
+    html_path = diagnostics_dir / "login_failure.html"
+    json_path = diagnostics_dir / "login_diagnostics.json"
+
+    summary: dict[str, Any] = {
+        "reason": reason,
+        "url": str(getattr(page, "url", "") or ""),
+        "title": "",
+        "screenshot": str(screenshot_path),
+        "html": str(html_path),
+    }
+    try:
+        summary["title"] = str(page.title())
+    except Exception:
+        summary["title"] = ""
+    try:
+        page.screenshot(path=str(screenshot_path), full_page=True)
+    except Exception as exc:
+        summary["screenshot_error"] = str(exc)
+    try:
+        html_path.write_text(str(page.content()), encoding="utf-8")
+    except Exception as exc:
+        summary["html_error"] = str(exc)
+    json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "json": str(json_path),
+        "screenshot": str(screenshot_path),
+        "html": str(html_path),
+    }
+
+
 def _login(
     page: Any,
     user: str,
@@ -634,6 +667,7 @@ def _login(
     allow_manual_login: bool = False,
     manual_login_timeout_seconds: int = 180,
     manual_login_poll_interval_seconds: int = 3,
+    diagnostics_dir: Path | None = None,
 ) -> str:
     page.goto("https://www.mysteel.com/", timeout=60000, wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
@@ -694,6 +728,8 @@ def _login(
         if ok:
             return f"人工登录成功（{proof}）"
     if not ok:
+        if diagnostics_dir is not None:
+            _write_login_diagnostics(page, diagnostics_dir, proof)
         raise WebPriceError(f"登录失败：{proof}。如遇验证码/滑块，请去掉 --headless 使用有头浏览器手动登录。")
     return f"登录成功（{proof}）"
 
@@ -849,15 +885,17 @@ def fetch_web_prices(
                 pwd,
                 allow_manual_login=not headless,
                 manual_login_timeout_seconds=manual_login_timeout_seconds,
+                diagnostics_dir=report_out.parent / "网页登录失败诊断",
             )
         except WebPriceError:
-            if connection_type == "cdp":
-                raise
             print(
                 "[web_price] 无头模式登录失败，将关闭并重新启动有头浏览器，"
                 "请在弹出的浏览器窗口中手动完成登录。"
             )
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                pass
             browser, context, page, connection_type = _launch_browser_with_state(p, headless=False)
             proof = _login(
                 page,
@@ -865,10 +903,11 @@ def fetch_web_prices(
                 pwd,
                 allow_manual_login=True,
                 manual_login_timeout_seconds=manual_login_timeout_seconds,
+                diagnostics_dir=report_out.parent / "网页登录失败诊断",
             )
 
         url = detail_url or _latest_url_from_list(page, str(list_page), city)
-        page.goto(url, timeout=60000, wait_until="networkidle")
+        page.goto(url, timeout=60000, wait_until="domcontentloaded")
         rows = _extract_detail_rows(page)
         h1 = page.locator("h1").first.inner_text().strip() if page.locator("h1").count() else ""
         title = page.title()

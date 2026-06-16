@@ -20,7 +20,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Extract steel quote prices and inventory from text files or MiniMax vision image/PDF analysis."
     )
-    p.add_argument("--input", required=True, help="Input file path (.jpg/.png/.pdf/.txt)")
+    p.add_argument("--input", required=True, help="Input file path (.jpg/.png/.txt)")
     p.add_argument("--location", help="Optional target location filter, e.g. 蚌埠")
     p.add_argument(
         "--provider",
@@ -57,7 +57,9 @@ def main() -> int:
     provider = args.provider
     if input_path.suffix.lower() == ".txt":
         provider = "text"
-    elif input_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".pdf"}:
+    elif input_path.suffix.lower() == ".pdf":
+        raise SystemExit("PDF input is not supported. 请先将PDF转换为图片后再识别。")
+    elif input_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
         provider = "minimax"
 
     if provider == "text":

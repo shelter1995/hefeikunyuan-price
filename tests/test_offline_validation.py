@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from ocr_price.offline_validation import validate_offline_payload
-from ocr_price.writeback_image_doc import load_source_prices
+from ocr_price.writeback_image_doc import load_source_prices, load_source_prices_with_errors
 
 
 def _base_payload() -> dict:
@@ -79,3 +79,22 @@ def test_load_source_prices_skips_invalid_payload(tmp_path: Path) -> None:
     prices = load_source_prices([valid_path, invalid_path], location="蚌埠")
     assert len(prices) == 1
     assert prices[0].company == "徐钢"
+
+
+def test_load_source_prices_with_errors_reports_invalid_payload(tmp_path: Path) -> None:
+    valid = _base_payload()
+    invalid = _base_payload()
+    invalid["meta"]["input_file"] = "金虹4.13.jpg"
+    invalid["records"][0]["coil_price"] = 10001
+
+    valid_path = tmp_path / "valid.json"
+    invalid_path = tmp_path / "invalid.json"
+    _write_json(valid_path, valid)
+    _write_json(invalid_path, invalid)
+
+    result = load_source_prices_with_errors([valid_path, invalid_path], location="蚌埠")
+
+    assert len(result.prices) == 1
+    assert len(result.errors) == 1
+    assert result.errors[0]["source_json"].endswith("invalid.json")
+    assert "above hard maximum" in result.errors[0]["errors"][0]

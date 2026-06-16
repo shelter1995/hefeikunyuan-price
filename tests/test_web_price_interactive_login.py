@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from ocr_price import web_price
@@ -36,6 +39,15 @@ class _FakePage:
         if "请输入用户名" in selector or "请输入密码" in selector:
             return _FakeLocator(1 if self.visible_inputs else 0)
         return _FakeLocator(0)
+
+    def title(self) -> str:
+        return "登录失败页"
+
+    def content(self) -> str:
+        return "<html>login failed</html>"
+
+    def screenshot(self, path: str, full_page: bool = True) -> None:
+        Path(path).write_bytes(b"png")
 
 
 def test_login_waits_for_manual_login_when_auto_login_fails(monkeypatch):
@@ -113,3 +125,86 @@ def test_login_falls_back_to_manual_when_auto_submit_fails(monkeypatch):
     )
 
     assert "人工登录成功" in proof
+
+
+def test_login_failure_writes_diagnostics(monkeypatch, tmp_path: Path):
+    page = _FakePage()
+
+    def fake_detect_logged_in(page_arg, retry=False):
+        return False, "未检测到登录态"
+
+    monkeypatch.setattr(web_price, "_detect_logged_in", fake_detect_logged_in)
+
+    with pytest.raises(web_price.WebPriceError):
+        web_price._login(
+            page,
+            "user",
+            "pwd",
+            allow_manual_login=False,
+            manual_login_timeout_seconds=1,
+            manual_login_poll_interval_seconds=1,
+            diagnostics_dir=tmp_path,
+        )
+
+    summary = json.loads((tmp_path / "login_diagnostics.json").read_text(encoding="utf-8"))
+    assert summary["reason"] == "未检测到登录态"
+    assert (tmp_path / "login_failure.png").exists()
+    assert (tmp_path / "login_failure.html").exists()
+
+
+def test_fetch_web_prices_falls_back_from_cdp_to_persistent_browser(monkeypatch, tmp_path: Path):
+    calls: list[str] = []
+    page = _FakePage()
+
+    class _FakePlaywright:
+        chromium = object()
+
+    class _FakeSyncPlaywright:
+        def __enter__(self):
+            return _FakePlaywright()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeBrowser:
+        def close(self):
+            calls.append("close")
+
+    def fake_sync_playwright():
+        return _FakeSyncPlaywright()
+
+    def fake_launch_browser_with_state(p, headless):
+        calls.append(f"launch:{headless}")
+        return _FakeBrowser(), _FakeBrowser(), page, "cdp" if len(calls) == 1 else "persistent"
+
+    def fake_login(page_arg, user, pwd, allow_manual_login, manual_login_timeout_seconds, diagnostics_dir=None):
+        calls.append(f"login:{allow_manual_login}")
+        if len([x for x in calls if x.startswith("login:")]) == 1:
+            raise web_price.WebPriceError("CDP登录态失效")
+        return "人工登录成功"
+
+    monkeypatch.setattr(web_price, "sync_playwright", fake_sync_playwright)
+    monkeypatch.setattr(web_price, "_parse_credentials", lambda *args, **kwargs: ("u", "p"))
+    monkeypatch.setattr(web_price, "_launch_browser_with_state", fake_launch_browser_with_state)
+    monkeypatch.setattr(web_price, "_login", fake_login)
+    monkeypatch.setattr(web_price, "_latest_url_from_list", lambda *args, **kwargs: "https://example.com/detail")
+    monkeypatch.setattr(web_price, "_extract_detail_rows", lambda page_arg: [{"钢厂/产地": "测试钢厂"}])
+    monkeypatch.setattr(web_price, "_parse_date", lambda text: "2026-06-16")
+    monkeypatch.setattr(web_price, "_export_raw", lambda rows, output_excel: output_excel.write_text("raw", encoding="utf-8"))
+    monkeypatch.setattr(web_price, "_source_mills", lambda rows: ["测试钢厂"])
+
+    report = web_price.fetch_web_prices(
+        project_excel=tmp_path / "安徽合肥-安徽蚌埠-测试.xlsx",
+        location="安徽合肥",
+        list_url="https://example.com/list",
+        detail_url=None,
+        account_file=tmp_path / "account.txt",
+        username=None,
+        password=None,
+        output_excel=tmp_path / "raw.xlsx",
+        report_out=tmp_path / "report.json",
+        headless=True,
+    )
+
+    assert report["login_proof"] == "人工登录成功"
+    assert calls[:4] == ["launch:True", "login:False", "close", "launch:False"]
