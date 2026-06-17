@@ -30,6 +30,7 @@ from .writeback_image_doc import (
     load_source_prices_with_errors,
     prepare_mapping as prepare_image_mapping,
 )
+from .env_loader import load_env_file
 from .reporting import render_single_report_markdown
 from .audit import audit_image_doc_updates
 from .events import append_event
@@ -220,7 +221,7 @@ def _default_ocr_output(input_file: Path, artifact_dir: Path) -> Path:
 
 
 def _run_ocr_for_inputs(inputs: list[Path], location: str, artifact_dir: Path) -> dict[str, Any]:
-    """Run OCR for input files. All image/PDF files use MiniMax vision recognition."""
+    """Run OCR for input files. Image files use MiniMax vision recognition."""
     outputs: list[str] = []
     items: list[dict[str, Any]] = []
     # Set UTF-8 encoding for child processes to avoid UnicodeEncodeError on Windows
@@ -239,7 +240,7 @@ def _run_ocr_for_inputs(inputs: list[Path], location: str, artifact_dir: Path) -
             "--output",
             str(out),
         ]
-        # All image and PDF files use MiniMax vision recognition by default
+        # Image files use MiniMax vision recognition by default
         # Text files (.txt) will be auto-detected and processed with text parser
         completed = subprocess.run(
             cmd,
@@ -1245,6 +1246,7 @@ def _default_offline_sources(offline_dir: Path = DEFAULT_OFFLINE_DIR) -> list[st
 
 
 def main() -> int:
+    load_env_file()
     args = _build_parser().parse_args()
     if args.dry_run and args.confirm_write:
         raise SystemExit("--dry-run 与 --confirm-write 不能同时使用。")

@@ -1,3 +1,30 @@
+[project]
+name = "ocr-price"
+version = "0.1.0"
+description = "钢材价格自动化更新系统（网价抓取 + 图片/文档识别 + 库存标注）"
+requires-python = ">=3.12"
+dependencies = [
+  "requests>=2.31.0",
+  "openpyxl>=3.1.5",
+  "playwright>=1.54.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.6.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["ocr_price*"]
+exclude = [
+  "项目报价*",
+  "线下报价*",
+  "运行产物*",
+  "skills*",
+  "archive*",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

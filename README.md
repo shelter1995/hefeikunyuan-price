@@ -10,7 +10,7 @@
   - `web` / `image_doc` / `both` 三种模式
 
 ### 1.1 线下图片识别主链路说明（2026-05-11）
-- 图片/PDF 默认只走 `MiniMax VLM` 结构化识别主链路。
+- 图片（`.jpg`/`.png`）默认只走 `MiniMax VLM` 结构化识别主链路。
 - 传统 OCR 不再参与默认执行流程，仅保留历史诊断用途。
 - 模型输出会进入确定性规则校验（价格范围、目标地点、库存状态），校验失败会阻断回写并进入人工确认。
 
@@ -595,6 +595,6 @@ python skills/quote-update/scripts/make_agent_prompt.py single-confirm `
 ## 6. 常见问题
 
 - 登录失败：先检查 `网站账号密码.txt` 与站点登录态/风控。
-- MiniMax API异常：检查 `.env` 中的 `MINIMAX_API_KEY` 是否配置正确。图片/PDF 识别和补充报价语义理解都复用该 Key；补充报价会优先调用 MiniMax 文本模型，并把结构化结果缓存到补充 JSON 的 `_semantic_adjustments`，供 confirm-write 复用。
+- MiniMax API异常：检查 `.env` 中的 `MINIMAX_API_KEY` 是否配置正确。图片识别和补充报价语义理解都复用该 Key；补充报价会优先调用 MiniMax 文本模型，并把结构化结果缓存到补充 JSON 的 `_semantic_adjustments`，供 confirm-write 复用。
 - 若报告里有 `pending_confirmation`：先确认待确认对照，再重跑同一命令。
 - 若想强制重新匹配：删除 `运行产物/*/厂家对照表_*_正式.json` 和 `运行产物/*/*已确认.json`，再执行更新。

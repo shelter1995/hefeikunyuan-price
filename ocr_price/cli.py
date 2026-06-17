@@ -18,7 +18,7 @@ from .parser import (
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Extract steel quote prices and inventory from text files or MiniMax vision image/PDF analysis."
+        description="Extract steel quote prices and inventory from text files or MiniMax vision image analysis."
     )
     p.add_argument("--input", required=True, help="Input file path (.jpg/.png/.txt)")
     p.add_argument("--location", help="Optional target location filter, e.g. 蚌埠")
@@ -26,7 +26,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--provider",
         choices=("text", "minimax"),
         default="minimax",
-        help="Processing mode. Text files use text parser; image/PDF files use MiniMax VLM vision.",
+        help="Processing mode. Text files use text parser; image files use MiniMax VLM vision.",
     )
     p.add_argument(
         "--env-file",
